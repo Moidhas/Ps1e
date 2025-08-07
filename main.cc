@@ -3,6 +3,7 @@
 #include <array>
 #include <cassert>
 #include <climits>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -26,6 +27,18 @@ constexpr size_t bitSize() noexcept {
     return sizeof(T) * CHAR_BIT;
 }
 
+template <integral T>
+constexpr size_t numLimit() noexcept {
+    return (1 << bitSize<T>()) - 1;
+}
+
+template <unsigned_integral T, unsigned_integral U> 
+constexpr T uintNoTruncCast(const U x) noexcept {
+    assert(numLimit<T>() >= x);
+    return static_cast<T>(x);
+}
+
+
 // checkout table 3.2:
 // https://student.cs.uwaterloo.ca/~cs350/common/r3000-manual.pdf
 enum class ExcCode : u32 {
@@ -42,6 +55,84 @@ enum class ExcCode : u32 {
     RI,
     CpU,
     Ov
+};
+
+// These contain the insturctions that use the most significant six bits of the opcode to decode.
+// It contains the necesssary bits to decode.
+enum class PrimaryOps: u8 {
+    SPECIAL = 0x00,
+    BCONDZ = 0x01,
+    J = 0x02,
+    JAL = 0x03,
+    BEQ = 0x04,
+    BNE = 0x05,
+    BLEZ = 0x06,
+    BGTZ = 0x07,
+    ADDI = 0x08,
+    ADDIU = 0x09,
+    SLTI = 0x0a,
+    SLTIU = 0x0b,
+    ANDI = 0x0c,
+    ORI = 0x0d,
+    XORI = 0x0e,
+    LUI = 0x0f,
+    COP0 = 0x10,
+    COP1 = 0x11,
+    COP2 = 0x12,
+    COP3 = 0x13,
+    LB = 0X20,
+    LH = 0x21,
+    LWL = 0x22,
+    LW = 0x23,
+    LBU = 0x24,
+    LHU = 0x25,
+    LWR = 0x26,
+    SB = 0X28,
+    SH = 0x29,
+    SWL = 0x2A,
+    SW = 0x2B,
+    SWR = 0X2E,
+    LWC0 = 0X30,
+    LWC1 = 0x31,
+    LWC2 = 0x32,
+    LWC3 = 0x33,
+    SWC0 = 0X38,
+    SWC1 = 0x39,
+    SWC2 = 0x3A,
+    SWC3 = 0x3B,
+};
+
+// These contain the insturctions that use the least significant six bits of the opcode to decode.
+// It contains the necesssary bits to decode.
+enum class SecondaryOps : u8 {
+    SLL     = 0x00,
+    SRL     = 0x02,
+    SRA     = 0x03,
+    SLLV    = 0x04,
+    SRLV    = 0x06,
+    SRAV    = 0x07,
+    JR      = 0x08,
+    JALR    = 0x09,
+    SYSCALL = 0x0C,
+    BREAK   = 0x0D,
+    MFHI    = 0x10,
+    MTHI    = 0x11,
+    MFLO    = 0x12,
+    MTLO    = 0x13,
+    MULT    = 0x18,
+    MULTU   = 0x19,
+    DIV     = 0x1A,
+    DIVU    = 0x1B,
+    ADD     = 0x20,
+    ADDU    = 0x21,
+    SUB     = 0x22,
+    SUBU    = 0x23,
+    AND     = 0x24,
+    OR      = 0x25,
+    XOR     = 0x26,
+    NOR     = 0x27,
+    SLT     = 0x2A,
+    SLTU    = 0x2B,
 };
 
 struct MipsException {
@@ -154,8 +245,32 @@ struct COP0 {
     }
 };
 
+enum class State { NoLoadDelay, LoadDelay };
+
+template <typename T, size_t Size>
+class FQueue {
+    array<T, Size> buffer;
+    size_t i = 0;
+
+   public:
+    T top() { return buffer[i]; }
+
+    void pop() { i = (i + 1) % buffer.size(); }
+
+    void push(const T &val) { buffer[(i + 1) % buffer.size()] = val; }
+
+    size_t size() { return buffer.size(); }
+};
+
+struct DelaySlot {
+    u32 regId;
+    u32 value;
+};
+
 struct Cpu {
     Registers reg;
+    State state;
+    FQueue<DelaySlot, 2> loadDelaySlots;
     COP0 cop0;
     Memory mem;
 
@@ -165,8 +280,15 @@ struct Cpu {
         while (true) {
             u32 opcode = mem.load32(reg.pc);
             try {
-                exeInstr(opcode);
+                const State newState = exeInstr(opcode);
                 reg.pc += 4;
+                if (state == State::LoadDelay) {
+                    const DelaySlot delaySlot = loadDelaySlots.top();
+                    loadDelaySlots.pop();
+                    reg.gpr[delaySlot.regId] = delaySlot.value;
+                }
+                state = newState;
+                reg.gpr[0] = 0;
             } catch (const MipsException &e) {
                 cop0.epc = e.EPC;
                 cop0.sr = cop0.srStackPush(true, false);
@@ -177,12 +299,15 @@ struct Cpu {
         }
     }
 
+    // shifts the extractedBits to least significant end.
     u32 extractBits(u32 opcode, u32 start, u32 length) {
         const u32 end = sizeof(opcode) * 8 - 1;
         assert(end >= start && start + length - 1 <= end);
 
         u32 shifted = opcode >> start;
         u32 mask = (1 << length) - 1;
+
+        assert((shifted & mask) <= (1 << length) - 1);
         return shifted & mask;
     }
 
@@ -201,28 +326,40 @@ struct Cpu {
                              : (dst & dstMask) | ((src & srcMask) << distance);
     }
 
-    void exeInstr(u32 opcode) {
-        const u32 op = extractBits(opcode, 26, 6);
-        const u32 op2 = extractBits(opcode, 0, 6);
-        const u32 rd = extractBits(opcode, 11, 5);
-        const u32 rs = extractBits(opcode, 21, 5);
-        const u32 rt = extractBits(opcode, 16, 5);
-        const u32 imm5 = extractBits(opcode, 6, 5);
-        const u16 imm16 = extractBits(opcode, 0, 16);
+    State exeInstr(u32 opcode) {
+        const u8 op = uintNoTruncCast<u8>(extractBits(opcode, 26, 6));
+        const u8 op2 = uintNoTruncCast<u8>(extractBits(opcode, 0, 6));
+        const u8 rd = uintNoTruncCast<u8>(extractBits(opcode, 11, 5));
+        const u8 rs = uintNoTruncCast<u8>(extractBits(opcode, 21, 5));
+        const u8 rt = uintNoTruncCast<u8>(extractBits(opcode, 16, 5));
+        const u8 imm5 = uintNoTruncCast<u8>(extractBits(opcode, 6, 5));
+        const u16 imm16 = uintNoTruncCast<u16>(extractBits(opcode, 0, 16));
         const u32 imm26 = extractBits(opcode, 0, 26);
 
         if (op != 0) {
             // I/J-Type
-            // THIS IS WRONG I HAVE TO IMPLEMENT LOAD DELAYS
             switch (op) {
                 case 0x20:
-                    reg.gpr[rt] = lb(reg.gpr[rs], imm16);
+                    loadDelaySlots.push({rt, lb(reg.gpr[rs], imm16)});
+                    return State::LoadDelay;
                 case 0x21:
-                case 0x22:
+                    loadDelaySlots.push({rt, lh(reg.gpr[rs], imm16)});
+                    return State::LoadDelay;
+                case 0x22:  // LWL
                 case 0x23:
+                    loadDelaySlots.push({rt, lw(reg.gpr[rs], imm16)});
+                    return State::LoadDelay;
                 case 0x24:
+                    loadDelaySlots.push({rt, lbu(reg.gpr[rs], imm16)});
+                    return State::LoadDelay;
                 case 0x25:
-                case 0x26:
+                    loadDelaySlots.push({rt, lhu(reg.gpr[rs], imm16)});
+                    return State::LoadDelay;
+                case 0x26: // LWLR
+                default:
+                    throw runtime_error{
+                        format("invalid opcode: {:032b}, op: {:x}, op2: {:x}",
+                               opcode, op, op2)};
             };
         } else {
             // R-Type
@@ -239,11 +376,14 @@ struct Cpu {
                 case 0x23:
                     reg.gpr[rd] = subu(rs, rt);
                     break;
+                default:
+                    throw runtime_error{
+                        format("invalid opcode: {:032b}, op: {:x}, op2: {:x}",
+                               opcode, op, op2)};
             };
         }
 
-        throw runtime_error{format(
-            "invalid opcode: {:032b}, op: {:x}, op2: {:x}", opcode, op, op2)};
+        return State::NoLoadDelay;
     }
 
     // Right means read the most significant bytes of the source into the low
