@@ -337,25 +337,24 @@ struct Cpu {
         const u32 imm26 = extractBits(opcode, 0, 26);
 
         if (op != 0) {
-            // I/J-Type
-            switch (op) {
-                case 0x20:
+            switch (static_cast<PrimaryOps>(op)) {
+                case PrimaryOps::LB:
                     loadDelaySlots.push({rt, lb(reg.gpr[rs], imm16)});
                     return State::LoadDelay;
-                case 0x21:
+                case PrimaryOps::LH:
                     loadDelaySlots.push({rt, lh(reg.gpr[rs], imm16)});
                     return State::LoadDelay;
-                case 0x22:  // LWL
-                case 0x23:
+                case PrimaryOps::LWL:  // LWL
+                case PrimaryOps::LW:
                     loadDelaySlots.push({rt, lw(reg.gpr[rs], imm16)});
                     return State::LoadDelay;
-                case 0x24:
+                case PrimaryOps::LBU:
                     loadDelaySlots.push({rt, lbu(reg.gpr[rs], imm16)});
                     return State::LoadDelay;
-                case 0x25:
+                case PrimaryOps::LHU:
                     loadDelaySlots.push({rt, lhu(reg.gpr[rs], imm16)});
                     return State::LoadDelay;
-                case 0x26: // LWLR
+                case PrimaryOps::LWR: 
                 default:
                     throw runtime_error{
                         format("invalid opcode: {:032b}, op: {:x}, op2: {:x}",
@@ -363,17 +362,17 @@ struct Cpu {
             };
         } else {
             // R-Type
-            switch (op2) {
-                case 0x20:
+            switch (static_cast<SecondaryOps>(op2)) {
+                case SecondaryOps::ADD:
                     reg.gpr[rd] = add(rs, rt);
                     break;
-                case 0x21:
+                case SecondaryOps::ADDU:
                     reg.gpr[rd] = addu(rs, rt);
                     break;
-                case 0x22:
+                case SecondaryOps::SUB:
                     reg.gpr[rd] = sub(rs, rt);
                     break;
-                case 0x23:
+                case SecondaryOps::SUBU:
                     reg.gpr[rd] = subu(rs, rt);
                     break;
                 default:
