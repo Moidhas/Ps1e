@@ -32,12 +32,11 @@ constexpr size_t numLimit() noexcept {
     return (1 << bitSize<T>()) - 1;
 }
 
-template <unsigned_integral T, unsigned_integral U> 
+template <unsigned_integral T, unsigned_integral U>
 constexpr T uintNoTruncCast(const U x) noexcept {
     assert(numLimit<T>() >= x);
     return static_cast<T>(x);
 }
-
 
 // checkout table 3.2:
 // https://student.cs.uwaterloo.ca/~cs350/common/r3000-manual.pdf
@@ -57,9 +56,9 @@ enum class ExcCode : u32 {
     Ov
 };
 
-// These contain the insturctions that use the most significant six bits of the opcode to decode.
-// It contains the necesssary bits to decode.
-enum class PrimaryOps: u8 {
+// These contain the insturctions that use the most significant six bits of the
+// opcode to decode. It contains the necesssary bits to decode.
+enum class PrimaryOps : u8 {
     SPECIAL = 0x00,
     BCONDZ = 0x01,
     J = 0x02,
@@ -102,37 +101,37 @@ enum class PrimaryOps: u8 {
     SWC3 = 0x3B,
 };
 
-// These contain the insturctions that use the least significant six bits of the opcode to decode.
-// It contains the necesssary bits to decode.
+// These contain the insturctions that use the least significant six bits of the
+// opcode to decode. It contains the necesssary bits to decode.
 enum class SecondaryOps : u8 {
-    SLL     = 0x00,
-    SRL     = 0x02,
-    SRA     = 0x03,
-    SLLV    = 0x04,
-    SRLV    = 0x06,
-    SRAV    = 0x07,
-    JR      = 0x08,
-    JALR    = 0x09,
+    SLL = 0x00,
+    SRL = 0x02,
+    SRA = 0x03,
+    SLLV = 0x04,
+    SRLV = 0x06,
+    SRAV = 0x07,
+    JR = 0x08,
+    JALR = 0x09,
     SYSCALL = 0x0C,
-    BREAK   = 0x0D,
-    MFHI    = 0x10,
-    MTHI    = 0x11,
-    MFLO    = 0x12,
-    MTLO    = 0x13,
-    MULT    = 0x18,
-    MULTU   = 0x19,
-    DIV     = 0x1A,
-    DIVU    = 0x1B,
-    ADD     = 0x20,
-    ADDU    = 0x21,
-    SUB     = 0x22,
-    SUBU    = 0x23,
-    AND     = 0x24,
-    OR      = 0x25,
-    XOR     = 0x26,
-    NOR     = 0x27,
-    SLT     = 0x2A,
-    SLTU    = 0x2B,
+    BREAK = 0x0D,
+    MFHI = 0x10,
+    MTHI = 0x11,
+    MFLO = 0x12,
+    MTLO = 0x13,
+    MULT = 0x18,
+    MULTU = 0x19,
+    DIV = 0x1A,
+    DIVU = 0x1B,
+    ADD = 0x20,
+    ADDU = 0x21,
+    SUB = 0x22,
+    SUBU = 0x23,
+    AND = 0x24,
+    OR = 0x25,
+    XOR = 0x26,
+    NOR = 0x27,
+    SLT = 0x2A,
+    SLTU = 0x2B,
 };
 
 struct MipsException {
@@ -247,32 +246,66 @@ struct COP0 {
 
 enum class State { NoLoadDelay, LoadDelay };
 
-template <typename T, size_t Size>
-class FQueue {
-    array<T, Size> buffer;
-    size_t i = 0;
-
-   public:
-    T top() { return buffer[i]; }
-
-    void pop() { i = (i + 1) % buffer.size(); }
-
-    void push(const T &val) { buffer[(i + 1) % buffer.size()] = val; }
-
-    size_t size() { return buffer.size(); }
-};
-
 struct DelaySlot {
     u32 regId;
     u32 value;
 };
 
+class CpuState {
+    array<DelaySlot, 2> loadDelaySlots;
+    s8 currLoadDelaySlot;
+    s8 topLoadDelaySlot;
+    State state;
+public:
+    CpuState(): currLoadDelaySlot{-1}, topLoadDelaySlot{-1} {}
+
+    bool isLoadDelaySlotsEmpty() {
+        return currLoadDelaySlot == -1;
+    }
+
+    bool isLoadDelaySlotsFull() {
+        return currLoadDelaySlot == loadDelaySlots.size();
+    }
+
+    DelaySlot getTopLoadDelaySlot() {
+        assert(state == State::LoadDelay);
+        assert(0 <= currLoadDelaySlot && currLoadDelaySlot < loadDelaySlots.size());
+        return loadDelaySlots[topLoadDelaySlot]; 
+    }
+
+    DelaySlot getCurrentLoadDelaySlot() {
+        assert(state == State::LoadDelay);
+        assert(0 <= currLoadDelaySlot && currLoadDelaySlot < loadDelaySlots.size());
+        return loadDelaySlots[currLoadDelaySlot];
+    }
+
+    void updateLoadDelaySlot(const DelaySlot &delaySlot) {
+        if (topLoadDelaySlot == currLoadDelaySlot) ++topLoadDelaySlot;
+        ++currLoadDelaySlot;
+        assert(currLoadDelaySlot  < loadDelaySlots.size());
+        state = State::LoadDelay;
+        loadDelaySlots[currLoadDelaySlot] = delaySlot;
+    }
+
+    void clearTopLoadDelaySlot() {
+        assert(currLoadDelaySlot >= 0);
+        if (topLoadDelaySlot == currLoadDelaySlot) --currLoadDelaySlot;
+        topLoadDelaySlot = currLoadDelaySlot;
+    }
+
+    void clearCurrentLoadDelaySlot() {
+        assert(currLoadDelaySlot >= 0);
+        if (topLoadDelaySlot == currLoadDelaySlot) --topLoadDelaySlot;
+        --currLoadDelaySlot;
+    }
+};
+
 struct Cpu {
     Registers reg;
-    State state;
-    FQueue<DelaySlot, 2> loadDelaySlots;
     COP0 cop0;
     Memory mem;
+    CpuState cpuState;
+    State state;
 
     Cpu() { reg.pc = mem.BIOS_RANGE.start; }
 
@@ -280,11 +313,10 @@ struct Cpu {
         while (true) {
             u32 opcode = mem.load32(reg.pc);
             try {
-                const State newState = exeInstr(opcode);
+                State newState = exeInstr(opcode);
                 reg.pc += 4;
-                if (state == State::LoadDelay) {
-                    const DelaySlot delaySlot = loadDelaySlots.top();
-                    loadDelaySlots.pop();
+                if (state == State::LoadDelay && !cpuState.isLoadDelaySlotsEmpty()) {
+                    const DelaySlot delaySlot = cpuState.getTopLoadDelaySlot();
                     reg.gpr[delaySlot.regId] = delaySlot.value;
                 }
                 state = newState;
@@ -326,6 +358,15 @@ struct Cpu {
                              : (dst & dstMask) | ((src & srcMask) << distance);
     }
 
+    void nonLoadWrite(u32 regId, u32 val) {
+        assert(regId <= reg.gpr.size());
+        if (!cpuState.isLoadDelaySlotsEmpty() && cpuState.getCurrentLoadDelaySlot().regId == regId) {
+            cpuState.clearCurrentLoadDelaySlot();
+        }
+
+        reg.gpr[regId] = val;
+    }
+
     State exeInstr(u32 opcode) {
         const u8 op = uintNoTruncCast<u8>(extractBits(opcode, 26, 6));
         const u8 op2 = uintNoTruncCast<u8>(extractBits(opcode, 0, 6));
@@ -337,43 +378,46 @@ struct Cpu {
         const u32 imm26 = extractBits(opcode, 0, 26);
 
         if (op != 0) {
+            using enum PrimaryOps;
             switch (static_cast<PrimaryOps>(op)) {
-                case PrimaryOps::LB:
-                    loadDelaySlots.push({rt, lb(reg.gpr[rs], imm16)});
+                case LB:
+                    cpuState.updateLoadDelaySlot({rt, lb(reg.gpr[rs], imm16)});
                     return State::LoadDelay;
-                case PrimaryOps::LH:
-                    loadDelaySlots.push({rt, lh(reg.gpr[rs], imm16)});
+                case LH:
+                    cpuState.updateLoadDelaySlot({rt, lh(reg.gpr[rs], imm16)});
                     return State::LoadDelay;
-                case PrimaryOps::LWL:  // LWL
-                case PrimaryOps::LW:
-                    loadDelaySlots.push({rt, lw(reg.gpr[rs], imm16)});
+                case LWL:
                     return State::LoadDelay;
-                case PrimaryOps::LBU:
-                    loadDelaySlots.push({rt, lbu(reg.gpr[rs], imm16)});
+                case LW:
+                    cpuState.updateLoadDelaySlot({rt, lw(reg.gpr[rs], imm16)});
                     return State::LoadDelay;
-                case PrimaryOps::LHU:
-                    loadDelaySlots.push({rt, lhu(reg.gpr[rs], imm16)});
+                case LBU:
+                    cpuState.updateLoadDelaySlot({rt, lbu(reg.gpr[rs], imm16)});
                     return State::LoadDelay;
-                case PrimaryOps::LWR: 
+                case LHU:
+                    cpuState.updateLoadDelaySlot({rt, lhu(reg.gpr[rs], imm16)});
+                    return State::LoadDelay;
+                case LWR:
+                    return State::LoadDelay;
                 default:
                     throw runtime_error{
                         format("invalid opcode: {:032b}, op: {:x}, op2: {:x}",
                                opcode, op, op2)};
             };
         } else {
-            // R-Type
+            using enum SecondaryOps;
             switch (static_cast<SecondaryOps>(op2)) {
-                case SecondaryOps::ADD:
-                    reg.gpr[rd] = add(rs, rt);
+                case ADD:
+                    nonLoadWrite(rd, add(rs, rt));
                     break;
-                case SecondaryOps::ADDU:
-                    reg.gpr[rd] = addu(rs, rt);
+                case ADDU:
+                    nonLoadWrite(rd, addu(rs, rt));
                     break;
-                case SecondaryOps::SUB:
-                    reg.gpr[rd] = sub(rs, rt);
+                case SUB:
+                    nonLoadWrite(rd, sub(rs, rt));
                     break;
-                case SecondaryOps::SUBU:
-                    reg.gpr[rd] = subu(rs, rt);
+                case SUBU:
+                    nonLoadWrite(rd, subu(rs, rt));
                     break;
                 default:
                     throw runtime_error{
@@ -381,31 +425,31 @@ struct Cpu {
                                opcode, op, op2)};
             };
         }
-
         return State::NoLoadDelay;
     }
 
-    // Right means read the most significant bytes of the source into the low
-    // bytes of the destination.
-    u32 lwr(const u32 r, const u32 s, const s16 imm16) {
-        const u32 addr = s + imm16;
+    // Reads the most significant bytes of the source into the least
+    // significant bytes of the destination.
+    u32 lwr(const u32 dest, const u32 base, const s16 offset) {
+        const u32 addr = base + offset;
         const u32 wordAddr = (addr / 4) * 4;
-        const u32 word = mem.load32(wordAddr);
+        const u32 src = mem.load32(wordAddr);
         const u32 bitLength = (addr - wordAddr + 1) * 8;
-        return replaceBitRange(r, 0, word,
+        return replaceBitRange(dest, 0, src,
                                static_cast<u32>(bitSize<u32>() - bitLength),
                                bitLength);
     }
 
-    // Means read the least significant bytes of the source into the high bytes
-    // of the destination.
-    u32 lwl(const u32 r, const u32 s, const s16 imm16) {
-        const u32 addr = s + imm16;
+    // Reads the least significant bytes of the source into the most significant
+    // bytes of the destination.
+    u32 lwl(const u32 dest, const u32 base, const s16 offset) {
+        const u32 addr = base + offset;
         const u32 wordAddr = (addr / 4) * 4;
-        const u32 word = mem.load32(wordAddr);
+        const u32 src = mem.load32(wordAddr);
         const u32 bitLength = (addr - wordAddr + 1) * 8;
-        return replaceBitRange(r, static_cast<u32>(bitSize<u32>() - bitLength),
-                               word, 0, bitLength);
+        return replaceBitRange(dest,
+                               static_cast<u32>(bitSize<u32>() - bitLength),
+                               src, 0, bitLength);
     }
 
     u32 lb(const u32 s, const s16 imm16) {

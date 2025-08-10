@@ -1,0 +1,15 @@
+lw $1 0($0) // Asume word 0 contains 0
+addi $1 $0 10
+// The next instruction $1 == 10  this is because of forwarding.
+
+lw $1 0($0)
+lw $1 0($2) 
+addi $1 $1 10 // this will use the first load instruction, and get rid of the previous load.
+
+So assuming the instruction in the delay slot doesn't write to the register or it is a load instruction then
+the value of the instruction before the load delay slot is used.
+
+Notes:
+Although special hardware ensures that a nop is not required between
+the lwl and lwr, there is still a load delay between the second of them
+and a normal instruction.
