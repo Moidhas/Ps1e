@@ -244,7 +244,7 @@ struct COP0 {
     }
 };
 
-enum class State { NoLoadDelay, LoadDelay };
+enum class State { NoLoadDelay, LoadDelay, OverWritten };
 
 struct DelaySlot {
     u32 regId;
@@ -318,13 +318,9 @@ class Ring {
    public:
     Ring() : start{0}, end{0}, count{0} {}
 
-    size_t size() {
-        return count;
-    }
+    size_t size() { return count; }
 
-    size_t capacity() {
-        return Capacity;
-    }
+    size_t capacity() { return Capacity; }
 
     void push_back(T val) {
         buffer[end] = val;
@@ -342,43 +338,31 @@ class Ring {
         --count;
     }
 
-    bool empty() {
-        return size() == 0;
-    }
+    bool empty() { return size() == 0; }
 
-    bool full() {
-        return size() == capacity();
-    }
+    bool full() { return size() == capacity(); }
 
-    T front() {
+    T &front() {
         assert(!empty());
         return buffer[start];
     }
 
-    T back() {
+    T &back() {
         assert(!empty());
         return (*this)[count - 1];
     }
 
-    T& operator [](size_t idx) {
+    T &operator[](size_t idx) {
         assert(idx < size());
         return buffer[(start + idx) % capacity()];
     }
-};
-
-template <typename T, size_t Size>
-class History {
-    array<T, Size> history;
-
-   public:
-    void record(const T &event) {}
 };
 
 struct Cpu {
     Registers reg;
     COP0 cop0;
     Memory mem;
-    State state;
+    Ring<dtoObj, 2> history;
 
     Cpu() { reg.pc = mem.BIOS_RANGE.start; }
 
@@ -393,26 +377,26 @@ struct Cpu {
                 if (decodedOp.newState == State::NoLoadDelay &&
                     decodedOp.type == Type::Write) {
                     reg.gpr[decodedOp.dstRegId] = decodedOp.value;
-                    // if (state == State::LoadDelay &&
-                    //     cpuState.last().regId == decodedOp.dstRegId) {
-                        // cpuState.clearLastSlot();
-                    // }
-                } else if (decodedOp.newState == State::LoadDelay &&
-                           decodedOp.type == Type::Write) {
-                    // cpuState.push({decodedOp.dstRegId, decodedOp.value});
+
+                    if (!history.empty()) {
+                        dtoObj &past = history.back();
+                        if (past.newState == State::LoadDelay &&
+                            past.dstRegId == decodedOp.dstRegId) {
+                            past.newState = State::OverWritten;
+                        }
+                    }
                 }
 
-                state = decodedOp.newState;
+                if (!history.empty()) {
+                    const dtoObj &past = history.back();
+                    if (past.newState == State::LoadDelay) {
+                        reg.gpr[past.dstRegId] = past.value;
+                    }
+                }
+
+                history.push_back(decodedOp);
                 reg.pc += 4;
                 reg.gpr[0] = 0;
-                // State newState = exeInstr(opcode);
-                // reg.pc += 4;
-                // if (state == State::LoadDelay && !cpuState.isEmpty()) {
-                //     const DelaySlot delaySlot = cpuState.first();
-                //     reg.gpr[delaySlot.regId] = delaySlot.value;
-                // }
-                // state = newState;
-                // reg.gpr[0] = 0;
             } catch (const MipsException &e) {
                 cop0.epc = e.EPC;
                 cop0.sr = cop0.srStackPush(true, false);
@@ -449,15 +433,6 @@ struct Cpu {
         return distance <= 0 ? (dst & dstMask) | ((src & srcMask) >> -distance)
                              : (dst & dstMask) | ((src & srcMask) << distance);
     }
-
-    // void nonLoadWrite(u32 regId, u32 val) {
-    // assert(regId <= reg.gpr.size());
-    // if (!cpuState.isEmpty() && cpuState.last().regId == regId) {
-    //     cpuState.clearLastSlot();
-    // }
-    //
-    // reg.gpr[regId] = val;
-    // }
 
     dtoObj decode(const u32 opcode) {
         const u8 primaryOp = uintNoTruncCast<u8>(extractBits(opcode, 26, 6));
@@ -526,67 +501,6 @@ struct Cpu {
                            secondaryOp)};
         };
     }
-
-    // State exeInstr(u32 opcode) {
-    // const u8 op = uintNoTruncCast<u8>(extractBits(opcode, 26, 6));
-    // const u8 op2 = uintNoTruncCast<u8>(extractBits(opcode, 0, 6));
-    // const u8 rd = uintNoTruncCast<u8>(extractBits(opcode, 11, 5));
-    // const u8 rs = uintNoTruncCast<u8>(extractBits(opcode, 21, 5));
-    // const u8 rt = uintNoTruncCast<u8>(extractBits(opcode, 16, 5));
-    // const u8 imm5 = uintNoTruncCast<u8>(extractBits(opcode, 6, 5));
-    // const u16 imm16 = uintNoTruncCast<u16>(extractBits(opcode, 0, 16));
-    // const u32 imm26 = extractBits(opcode, 0, 26);
-    //
-    // if (op != 0) {
-    //     using enum PrimaryOps;
-    //     switch (static_cast<PrimaryOps>(op)) {
-    //         case LB:
-    //             cpuState.addSlot({rt, lb(reg.gpr[rs], imm16)});
-    //             return State::LoadDelay;
-    //         case LH:
-    //             cpuState.addSlot({rt, lh(reg.gpr[rs], imm16)});
-    //             return State::LoadDelay;
-    //         case LWL:
-    //             return State::LoadDelay;
-    //         case LW:
-    //             cpuState.addSlot({rt, lw(reg.gpr[rs], imm16)});
-    //             return State::LoadDelay;
-    //         case LBU:
-    //             cpuState.addSlot({rt, lbu(reg.gpr[rs], imm16)});
-    //             return State::LoadDelay;
-    //         case LHU:
-    //             cpuState.addSlot({rt, lhu(reg.gpr[rs], imm16)});
-    //             return State::LoadDelay;
-    //         case LWR:
-    //             return State::LoadDelay;
-    //         default:
-    //             throw runtime_error{
-    //                 format("invalid opcode: {:032b}, op: {:x}, op2: {:x}",
-    //                        opcode, op, op2)};
-    //     };
-    // } else {
-    //     using enum SecondaryOps;
-    //     switch (static_cast<SecondaryOps>(op2)) {
-    //         case ADD:
-    //             nonLoadWrite(rd, add(rs, rt));
-    //             break;
-    //         case ADDU:
-    //             nonLoadWrite(rd, addu(rs, rt));
-    //             break;
-    //         case SUB:
-    //             nonLoadWrite(rd, sub(rs, rt));
-    //             break;
-    //         case SUBU:
-    //             nonLoadWrite(rd, subu(rs, rt));
-    //             break;
-    //         default:
-    //             throw runtime_error{
-    //                 format("invalid opcode: {:032b}, op: {:x}, op2: {:x}",
-    //                        opcode, op, op2)};
-    //     };
-    // }
-    // return State::NoLoadDelay;
-    // }
 
     // Reads the most significant bytes of the source into the least
     // significant bytes of the destination.
@@ -680,7 +594,7 @@ int main() {
     assert(cpu.replaceBitRange(0b10001, 1, 0b10000, 4, 1) == 0b10011);
     assert(cpu.replaceBitRange(0x0A'0B'0C'0D, 8, 0x00'01'02'03, 0, 24) ==
            0x01'02'03'0D);
-    
+
     Ring<u32, 8> ring;
     assert(ring.empty() == true);
     assert(ring.full() == false);
@@ -709,7 +623,6 @@ int main() {
     assert(ring.full() == false);
     assert(ring.front() == 2);
     assert(ring.back() == 10);
-
 
     // try {
     //     Cpu cpu;

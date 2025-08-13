@@ -6,7 +6,7 @@ lw $1 0($0)
 lw $1 0($2) 
 addi $1 $1 10 // this will use the first load instruction, and get rid of the previous load.
 
-So assuming the instruction in the delay slot doesn't write to the register or it is a load instruction then
+So assuming the instruction in the delay slot doesn't write to the register
 the value of the instruction before the load delay slot is used.
 
 Notes:
