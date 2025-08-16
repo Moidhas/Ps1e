@@ -244,158 +244,58 @@ struct COP0 {
     }
 };
 
-enum class State { NoLoadDelay, LoadDelay, OverWritten };
-
-struct DelaySlot {
-    u32 regId;
-    u32 value;
-};
-
-class CpuState {
-    array<DelaySlot, 2> loadDelaySlots;
-    s8 currLoadDelaySlot;
-    s8 topLoadDelaySlot;
-    State state;
-
-   public:
-    CpuState() : currLoadDelaySlot{-1}, topLoadDelaySlot{-1} {}
-
-    bool isEmpty() { return currLoadDelaySlot == -1; }
-
-    bool isFull() { return currLoadDelaySlot == loadDelaySlots.size(); }
-
-    DelaySlot first() {
-        assert(state == State::LoadDelay);
-        assert(0 <= currLoadDelaySlot &&
-               currLoadDelaySlot < loadDelaySlots.size());
-        return loadDelaySlots[topLoadDelaySlot];
-    }
-
-    DelaySlot last() {
-        assert(state == State::LoadDelay);
-        assert(0 <= currLoadDelaySlot &&
-               currLoadDelaySlot < loadDelaySlots.size());
-        return loadDelaySlots[currLoadDelaySlot];
-    }
-
-    void push(const DelaySlot &delaySlot) {
-        if (topLoadDelaySlot == currLoadDelaySlot) ++topLoadDelaySlot;
-        ++currLoadDelaySlot;
-        assert(currLoadDelaySlot < loadDelaySlots.size());
-        state = State::LoadDelay;
-        loadDelaySlots[currLoadDelaySlot] = delaySlot;
-    }
-
-    void clearFirstSlot() {
-        assert(currLoadDelaySlot >= 0);
-        if (topLoadDelaySlot == currLoadDelaySlot) --currLoadDelaySlot;
-        topLoadDelaySlot = currLoadDelaySlot;
-    }
-
-    void clearLastSlot() {
-        assert(currLoadDelaySlot >= 0);
-        if (topLoadDelaySlot == currLoadDelaySlot) --topLoadDelaySlot;
-        --currLoadDelaySlot;
-    }
-};
+enum class State { NoLoadDelay, SpecialLoadDelay, LoadDelay, OverWritten };
 
 enum class Type { Write, Branch };
 
-struct dtoObj {
+struct DecodedOp {
     State newState;
     Type type;
     u32 dstRegId;
     u32 value;
+
+    DecodedOp(State newState, Type type, u32 dstRegId, u32 value)
+        : newState{newState}, type{type}, dstRegId{dstRegId}, value{value} {}
 };
 
-template <typename T, size_t Capacity>
-class Ring {
-    array<T, Capacity> buffer;
-    size_t start;
-    size_t end;
-    size_t count;
-
-   public:
-    Ring() : start{0}, end{0}, count{0} {}
-
-    size_t size() { return count; }
-
-    size_t capacity() { return Capacity; }
-
-    void push_back(T val) {
-        buffer[end] = val;
-        end = (end + 1) % capacity();
-
-        if (full())
-            start = end;
-        else
-            ++count;
-    }
-
-    void pop_front() {
-        assert(!empty());
-        start = (start + 1) % capacity();
-        --count;
-    }
-
-    bool empty() { return size() == 0; }
-
-    bool full() { return size() == capacity(); }
-
-    T &front() {
-        assert(!empty());
-        return buffer[start];
-    }
-
-    T &back() {
-        assert(!empty());
-        return (*this)[count - 1];
-    }
-
-    T &operator[](size_t idx) {
-        assert(idx < size());
-        return buffer[(start + idx) % capacity()];
-    }
-};
+const DecodedOp ZERO_INSTR = {State::NoLoadDelay, Type::Write, 0, 0};
 
 struct Cpu {
     Registers reg;
     COP0 cop0;
     Memory mem;
-    Ring<dtoObj, 2> history;
 
     Cpu() { reg.pc = mem.BIOS_RANGE.start; }
 
     // This is where all side effects should be.
     void runCpuLoop() {
+        DecodedOp prevInstr{ZERO_INSTR};
+
         while (true) {
             u32 opcode = mem.load32(reg.pc);
             try {
-                dtoObj decodedOp = decode(opcode);
+                DecodedOp decodedOp = decode(opcode, prevInstr);
                 assert(decodedOp.dstRegId < reg.gpr.size());
 
+                // NEED TO IMPLEMENT: unless an IRQ occurs between the load and
+                // next opcode, in that case the load would complete during IRQ
+                // handling, and so, the next opcode would receive the NEW value
                 if (decodedOp.newState == State::NoLoadDelay &&
                     decodedOp.type == Type::Write) {
                     reg.gpr[decodedOp.dstRegId] = decodedOp.value;
 
-                    if (!history.empty()) {
-                        dtoObj &past = history.back();
-                        if (past.newState == State::LoadDelay &&
-                            past.dstRegId == decodedOp.dstRegId) {
-                            past.newState = State::OverWritten;
-                        }
+                    if (prevInstr.dstRegId == decodedOp.dstRegId) {
+                        prevInstr.newState = State::OverWritten;
                     }
                 }
 
-                if (!history.empty()) {
-                    const dtoObj &past = history.back();
-                    if (past.newState == State::LoadDelay) {
-                        reg.gpr[past.dstRegId] = past.value;
-                    }
+                if (prevInstr.newState == State::LoadDelay ||
+                    prevInstr.newState == State::SpecialLoadDelay) {
+                    reg.gpr[prevInstr.dstRegId] = prevInstr.value;
                 }
 
-                history.push_back(decodedOp);
                 reg.pc += 4;
+                prevInstr = decodedOp;
                 reg.gpr[0] = 0;
             } catch (const MipsException &e) {
                 cop0.epc = e.EPC;
@@ -434,13 +334,14 @@ struct Cpu {
                              : (dst & dstMask) | ((src & srcMask) << distance);
     }
 
-    dtoObj decode(const u32 opcode) {
+    DecodedOp decode(const u32 opcode, const DecodedOp &prevInstr) {
         const u8 primaryOp = uintNoTruncCast<u8>(extractBits(opcode, 26, 6));
 
-        return primaryOp != 0 ? decodePrimary(opcode) : decodeSecondary(opcode);
+        return primaryOp != 0 ? decodePrimary(opcode, prevInstr)
+                              : decodeSecondary(opcode);
     }
 
-    dtoObj decodePrimary(const u32 opcode) {
+    DecodedOp decodePrimary(const u32 opcode, const DecodedOp &prevInstr) {
         const u8 primaryOp = uintNoTruncCast<u8>(extractBits(opcode, 26, 6));
         const u8 rd = uintNoTruncCast<u8>(extractBits(opcode, 11, 5));
         const u8 rs = uintNoTruncCast<u8>(extractBits(opcode, 21, 5));
@@ -458,6 +359,14 @@ struct Cpu {
                 return {State::LoadDelay, Type::Write, rt,
                         lh(reg.gpr[rs], imm16)};
             case LWL:
+                if (prevInstr.newState == State::SpecialLoadDelay &&
+                    prevInstr.dstRegId == rt) {
+                    return {State::SpecialLoadDelay, Type::Write, rt,
+                            lwl(prevInstr.value, reg.gpr[rs], imm16)};
+                } else {
+                    return {State::SpecialLoadDelay, Type::Write, rt,
+                            lwl(reg.gpr[rt], reg.gpr[rs], imm16)};
+                }
             case LW:
                 return {State::LoadDelay, Type::Write, rt,
                         lw(reg.gpr[rs], imm16)};
@@ -468,13 +377,21 @@ struct Cpu {
                 return {State::LoadDelay, Type::Write, rt,
                         lhu(reg.gpr[rs], imm16)};
             case LWR:
+                if (prevInstr.newState == State::SpecialLoadDelay &&
+                    prevInstr.dstRegId == rt) {
+                    return {State::SpecialLoadDelay, Type::Write, rt,
+                            lwr(prevInstr.value, reg.gpr[rs], imm16)};
+                } else {
+                    return {State::SpecialLoadDelay, Type::Write, rt,
+                            lwr(reg.gpr[rt], reg.gpr[rs], imm16)};
+                }
             default:
                 throw runtime_error{format("invalid opcode: {:032b}, op: {:x}",
                                            opcode, primaryOp)};
         };
     }
 
-    dtoObj decodeSecondary(const u32 opcode) {
+    DecodedOp decodeSecondary(const u32 opcode) {
         const u8 secondaryOp = uintNoTruncCast<u8>(extractBits(opcode, 0, 6));
         const u8 rd = uintNoTruncCast<u8>(extractBits(opcode, 11, 5));
         const u8 rs = uintNoTruncCast<u8>(extractBits(opcode, 21, 5));
@@ -594,35 +511,6 @@ int main() {
     assert(cpu.replaceBitRange(0b10001, 1, 0b10000, 4, 1) == 0b10011);
     assert(cpu.replaceBitRange(0x0A'0B'0C'0D, 8, 0x00'01'02'03, 0, 24) ==
            0x01'02'03'0D);
-
-    Ring<u32, 8> ring;
-    assert(ring.empty() == true);
-    assert(ring.full() == false);
-    ring.push_back(0);
-    ring.push_back(1);
-    assert(ring[0] == 0);
-    assert(ring.front() == 0);
-    assert(ring[1] == 1);
-    assert(ring.back() == 1);
-    assert(ring.size() == 2);
-    assert(ring.capacity() == 8);
-    assert(ring.empty() == false);
-    for (int i = 2; i < 8; ++i) {
-        ring.push_back(i);
-    }
-    assert(ring.size() == 8);
-    assert(ring.full() == true);
-    assert(ring.back() == 7);
-    assert(ring.front() == 0);
-    ring.push_back(10);
-    assert(ring.back() == 10);
-    assert(ring.full());
-    assert(ring.empty() == false);
-    assert(ring.front() == 1);
-    ring.pop_front();
-    assert(ring.full() == false);
-    assert(ring.front() == 2);
-    assert(ring.back() == 10);
 
     // try {
     //     Cpu cpu;
