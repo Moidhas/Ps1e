@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <span>
 #include <stdexcept>
 #include <utility>
 using namespace std;
@@ -21,6 +22,10 @@ using u8 = uint8_t;
 using u16 = uint16_t;
 using u32 = uint32_t;
 using u64 = uint64_t;
+
+constexpr u32 KB = (1 << 10);
+constexpr u32 MB = (1 << 20);
+constexpr u32 GB = (1 << 30);
 
 template <typename T>
 constexpr size_t bitSize() noexcept {
@@ -149,8 +154,25 @@ struct Registers {
     u32 lo = 0;
 };
 
+struct Range {
+    const u32 start;
+    const u32 length;
+    constexpr Range(const u32 start, const u32 length)
+        : start{start}, length{length} {}
+
+    constexpr bool contains(const u32 addr) const {
+        if (length == 0) return false;
+        return start <= addr && addr <= start + (length - 1);
+    }
+
+    constexpr u32 getOffset(const u32 addr) const {
+        assert(contains(addr));
+        return addr - start;
+    }
+};
+
 struct Bios {
-    array<u8, 512 * 1024> buffer;
+    array<u8, 512 * KB> buffer;
 
     Bios() {
         struct stat info;
@@ -182,49 +204,156 @@ struct Bios {
     u8 load8(u32 offset) {
         assert(buffer.size() > offset && offset >= 0);
         u32 byte0 = (u32)buffer[offset];
-
         return byte0;
     }
-};
 
-struct Range {
-    const u32 start;
-    const u32 length;
-    Range(u32 start, u32 length) : start{start}, length{length} {}
-
-    bool contains(u32 addr) const {
-        return start <= addr && addr < start + length;
-    }
-
-    u32 getOffset(u32 addr) const {
-        assert(contains(addr));
-        return addr - start;
-    }
 };
 
 // Memory is little-endian.
 struct Memory {
-    const Range BIOS_RANGE{0xBFC00000, 512 * (1 << 10)};
+    // User Memory: KUSEG is intended to contain 2GB virtual memory (on extended
+    // MIPS processors), the PSX doesn't support virtual memory, and KUSEG
+    // simply contains a mirror of KSEG0/KSEG1 (in the first 512MB) (trying to
+    // access memory in the remaining 1.5GB causes an exception).
+    // source: https://psx-spx.consoledev.net/memorymap/#write-queue
+    constexpr static Range KUSEG_RANGE{0x00000000, 512 * MB};
+    constexpr static Range KSEG0_RANGE{0x80000000, 512 * MB};
+    constexpr static Range KSEG1_RANGE{0xA0000000, 512 * MB};
+    constexpr static Range KSEG2_RANGE{0xC0000000, GB};
+
+    constexpr static Range BIOS_RANGE{0xBFC00000, 512 * KB};
+
+    constexpr static Range PRAM_RANGE{0x00000000, 2 * MB};
+    constexpr static Range PE1_RANGE{0x1F000000, 8 * MB};
+    constexpr static Range PSCRATCHPAD_RANGE{0x1F800000, KB};
+    constexpr static Range PIO_RANGE{0x1F801000, 4 * KB};
+    constexpr static Range PE2_RANGE{0x1F802000, 8 * KB};
+    constexpr static Range PE3_RANGE{0x1FA00000, 2 * MB};
+    constexpr static Range PBIOS_RANGE{0x1FC00000, 512 * KB};
     Bios bios;
 
+    array<u8, PRAM_RANGE.length> ramBuffer;
+    array<u8, PE1_RANGE.length> e1Buffer;
+    array<u8, PSCRATCHPAD_RANGE.length> scratchpadBuffer;
+    array<u8, PIO_RANGE.length> ioBuffer;
+    array<u8, PE2_RANGE.length> e2Buffer;
+    array<u8, PE3_RANGE.length> e3Buffer;
+    array<u8, BIOS_RANGE.length> biosBuffer;
+
+    enum class BufferType {
+        Ram,
+        E1,
+        Scratchpad,
+        Io,
+        E2,
+        E3,
+        Bios,
+    };
+
+    struct MemBuffer {
+        span<u8> buffer;
+        BufferType type;
+        u32 getOffset(u32 pAddr) {
+            using enum BufferType;
+            switch (type) {
+                case Ram:
+                    return PRAM_RANGE.getOffset(pAddr);
+                case E1:
+                    return PE1_RANGE.getOffset(pAddr);
+                case Scratchpad:
+                    return PSCRATCHPAD_RANGE.getOffset(pAddr);
+                case Io:
+                    return PIO_RANGE.getOffset(pAddr);
+                case E2:
+                    return PE2_RANGE.getOffset(pAddr);
+                case E3:
+                    return PE3_RANGE.getOffset(pAddr);
+                case Bios:
+                    return PBIOS_RANGE.getOffset(pAddr);
+            }
+        }
+    };
+
+    // paddr is a physical (non-virtual) address. 
+    MemBuffer getMemBuffer(u32 pAddr) {
+        assert(paddr(pAddr) == pAddr);
+        using enum BufferType;
+        if (PRAM_RANGE.contains(pAddr))
+            return MemBuffer{ramBuffer, Ram};
+        else if (PE1_RANGE.contains(pAddr))
+            return MemBuffer{e1Buffer, E1};
+        else if (PSCRATCHPAD_RANGE.contains(pAddr))
+            return MemBuffer{scratchpadBuffer, Scratchpad};
+        else if (PIO_RANGE.contains(pAddr))
+            return MemBuffer{ioBuffer, Io};
+        else if (PE2_RANGE.contains(pAddr))
+            return MemBuffer{e2Buffer, E2};
+        else if (PE3_RANGE.contains(pAddr))
+            return MemBuffer{e3Buffer, E3};
+        else if (BIOS_RANGE.contains(pAddr))
+            return MemBuffer{biosBuffer, Bios};
+        else
+            throw;
+    }
+
     u32 load32(u32 addr) {
-        assert(BIOS_RANGE.contains(addr));
         assert(addr % 4 == 0);
-        return bios.load32(BIOS_RANGE.getOffset(addr));
+        const u32 pAddr = paddr(addr);
+        MemBuffer memBuffer = getMemBuffer(pAddr);
+        span<u8> &buffer = memBuffer.buffer;
+        u32 offset = memBuffer.getOffset(pAddr);
+
+        assert(buffer.size() > offset + 3 && offset >= 0);
+        u32 byte0 = (u32)buffer[offset + 0];
+        u32 byte1 = (u32)buffer[offset + 1] << 8;
+        u32 byte2 = (u32)buffer[offset + 2] << 16;
+        u32 byte3 = (u32)buffer[offset + 3] << 24;
+
+        return byte0 | byte1 | byte2 | byte3;
     }
 
     u16 load16(u32 addr) {
-        assert(BIOS_RANGE.contains(addr));
-        assert(addr % 2 != 0);
-        return bios.load8(BIOS_RANGE.getOffset(addr));
+        assert(addr % 2 == 0);
+
+        const u32 pAddr = paddr(addr);
+        MemBuffer memBuffer = getMemBuffer(pAddr);
+        span<u8> &buffer = memBuffer.buffer;
+        u32 offset = memBuffer.getOffset(pAddr);
+
+        assert(buffer.size() > offset + 1 && offset >= 0);
+        u32 byte0 = (u32)buffer[offset];
+        u32 byte1 = (u32)buffer[offset + 1] << 8;
+
+        return byte0 | byte1;
     }
 
     u8 load8(u32 addr) {
-        assert(BIOS_RANGE.contains(addr));
-        return bios.load8(BIOS_RANGE.getOffset(addr));
+        const u32 pAddr = paddr(addr);
+        MemBuffer memBuffer = getMemBuffer(pAddr);
+        span<u8> &buffer = memBuffer.buffer;
+        u32 offset = memBuffer.getOffset(pAddr);
+
+        assert(buffer.size() > offset && offset >= 0);
+        u32 byte0 = (u32)buffer[offset];
+        return byte0;
     }
 
-    u32 store32(u32 addr) {}
+    u32 store32(u32 addr) {
+
+    }
+
+    // Not implemented: KSEG1 addresses can't access scratchpad.
+    u32 paddr(const u32 addr) {
+        const bool condition = KSEG1_RANGE.contains(addr) || KSEG0_RANGE.contains(addr) || KUSEG_RANGE.contains(addr);
+
+        if (condition)
+            return 0xE0000000 & addr;
+        else if (KSEG2_RANGE.contains(addr))
+            return addr;
+        else
+            // BUS ERROR
+            throw;
+    }
 };
 
 struct COP0 {
@@ -313,9 +442,9 @@ struct Cpu {
         assert(end >= start && start + length - 1 <= end);
 
         u32 shifted = opcode >> start;
-        u32 mask = (1 << length) - 1;
+        u32 mask = static_cast<u64>(1 << length) - 1;
 
-        assert((shifted & mask) <= (1 << length) - 1);
+        assert((shifted & mask) <= static_cast<u64>(1 << length) - 1);
         return shifted & mask;
     }
 
