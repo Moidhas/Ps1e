@@ -6,6 +6,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <span>
@@ -171,46 +172,7 @@ struct Range {
     }
 };
 
-struct Bios {
-    array<u8, 512 * KB> buffer;
-
-    Bios() {
-        struct stat info;
-        stat("SCPH1001.BIN", &info);
-        if (buffer.size() != info.st_size)
-            throw runtime_error{"size of BIOS is not 512KB"};
-
-        ifstream bios{"SCPH1001.BIN", ios::binary | ios::in};
-        bios.read((char *)buffer.data(), buffer.size());
-    }
-
-    u32 load32(u32 offset) {
-        assert(buffer.size() > offset + 3 && offset >= 0);
-        u32 byte0 = (u32)buffer[offset + 0];
-        u32 byte1 = (u32)buffer[offset + 1] << 8;
-        u32 byte2 = (u32)buffer[offset + 2] << 16;
-        u32 byte3 = (u32)buffer[offset + 3] << 24;
-
-        return byte0 | byte1 | byte2 | byte3;
-    }
-
-    u16 load16(u32 offset) {
-        assert(buffer.size() > offset + 1 && offset >= 0);
-        u32 byte0 = (u32)buffer[offset];
-        u32 byte1 = (u32)buffer[offset + 1] << 8;
-        return byte0 | byte1;
-    }
-
-    u8 load8(u32 offset) {
-        assert(buffer.size() > offset && offset >= 0);
-        u32 byte0 = (u32)buffer[offset];
-        return byte0;
-    }
-
-};
-
-// Memory is little-endian.
-struct Memory {
+class MMap {
     // User Memory: KUSEG is intended to contain 2GB virtual memory (on extended
     // MIPS processors), the PSX doesn't support virtual memory, and KUSEG
     // simply contains a mirror of KSEG0/KSEG1 (in the first 512MB) (trying to
@@ -220,9 +182,6 @@ struct Memory {
     constexpr static Range KSEG0_RANGE{0x80000000, 512 * MB};
     constexpr static Range KSEG1_RANGE{0xA0000000, 512 * MB};
     constexpr static Range KSEG2_RANGE{0xC0000000, GB};
-
-    constexpr static Range BIOS_RANGE{0xBFC00000, 512 * KB};
-
     constexpr static Range PRAM_RANGE{0x00000000, 2 * MB};
     constexpr static Range PE1_RANGE{0x1F000000, 8 * MB};
     constexpr static Range PSCRATCHPAD_RANGE{0x1F800000, KB};
@@ -230,7 +189,6 @@ struct Memory {
     constexpr static Range PE2_RANGE{0x1F802000, 8 * KB};
     constexpr static Range PE3_RANGE{0x1FA00000, 2 * MB};
     constexpr static Range PBIOS_RANGE{0x1FC00000, 512 * KB};
-    Bios bios;
 
     array<u8, PRAM_RANGE.length> ramBuffer;
     array<u8, PE1_RANGE.length> e1Buffer;
@@ -238,7 +196,14 @@ struct Memory {
     array<u8, PIO_RANGE.length> ioBuffer;
     array<u8, PE2_RANGE.length> e2Buffer;
     array<u8, PE3_RANGE.length> e3Buffer;
-    array<u8, BIOS_RANGE.length> biosBuffer;
+    array<u8, PBIOS_RANGE.length> biosBuffer;
+
+    struct VAddress {
+        u32 m_addr;
+    };
+    struct PAddress {
+        u32 m_addr;
+    };
 
     enum class BufferType {
         Ram,
@@ -250,60 +215,104 @@ struct Memory {
         Bios,
     };
 
-    struct MemBuffer {
-        span<u8> buffer;
-        BufferType type;
-        u32 getOffset(u32 pAddr) {
-            using enum BufferType;
-            switch (type) {
-                case Ram:
-                    return PRAM_RANGE.getOffset(pAddr);
-                case E1:
-                    return PE1_RANGE.getOffset(pAddr);
-                case Scratchpad:
-                    return PSCRATCHPAD_RANGE.getOffset(pAddr);
-                case Io:
-                    return PIO_RANGE.getOffset(pAddr);
-                case E2:
-                    return PE2_RANGE.getOffset(pAddr);
-                case E3:
-                    return PE3_RANGE.getOffset(pAddr);
-                case Bios:
-                    return PBIOS_RANGE.getOffset(pAddr);
-            }
-        }
-    };
-
-    // paddr is a physical (non-virtual) address. 
-    MemBuffer getMemBuffer(u32 pAddr) {
-        assert(paddr(pAddr) == pAddr);
+    span<u8> getBuffer(BufferType type) {
         using enum BufferType;
-        if (PRAM_RANGE.contains(pAddr))
-            return MemBuffer{ramBuffer, Ram};
-        else if (PE1_RANGE.contains(pAddr))
-            return MemBuffer{e1Buffer, E1};
-        else if (PSCRATCHPAD_RANGE.contains(pAddr))
-            return MemBuffer{scratchpadBuffer, Scratchpad};
-        else if (PIO_RANGE.contains(pAddr))
-            return MemBuffer{ioBuffer, Io};
-        else if (PE2_RANGE.contains(pAddr))
-            return MemBuffer{e2Buffer, E2};
-        else if (PE3_RANGE.contains(pAddr))
-            return MemBuffer{e3Buffer, E3};
-        else if (BIOS_RANGE.contains(pAddr))
-            return MemBuffer{biosBuffer, Bios};
+        switch (type) {
+            case Ram:
+                return ramBuffer;
+            case E1:
+                return e1Buffer;
+            case Scratchpad:
+                return scratchpadBuffer;
+            case Io:
+                return ioBuffer;
+            case E2:
+                return e2Buffer;
+            case E3:
+                return e3Buffer;
+            case Bios:
+                return biosBuffer;
+        }
+    }
+
+    BufferType getType(const PAddress pAddr) {
+        const u32 addr = pAddr.m_addr;
+        using enum BufferType;
+        if (PRAM_RANGE.contains(addr))
+            return Ram;
+        else if (PE1_RANGE.contains(addr))
+            return E1;
+        else if (PSCRATCHPAD_RANGE.contains(addr))
+            return Scratchpad;
+        else if (PIO_RANGE.contains(addr))
+            return Io;
+        else if (PE2_RANGE.contains(addr))
+            return E2;
+        else if (PE3_RANGE.contains(addr))
+            return E3;
+        else if (PBIOS_RANGE.contains(addr))
+            return Bios;
+        else {
+            println("{:X}", addr);
+            assert(false);
+        }
+    }
+
+    u32 getOffset(const BufferType type, const PAddress pAddr) {
+        const u32 addr = pAddr.m_addr;
+        using enum BufferType;
+        switch (type) {
+            case Ram:
+                return PRAM_RANGE.getOffset(addr);
+            case E1:
+                return PE1_RANGE.getOffset(addr);
+            case Scratchpad:
+                return PSCRATCHPAD_RANGE.getOffset(addr);
+            case Io:
+                return PIO_RANGE.getOffset(addr);
+            case E2:
+                return PE2_RANGE.getOffset(addr);
+            case E3:
+                return PE3_RANGE.getOffset(addr);
+            case Bios:
+                return PBIOS_RANGE.getOffset(addr);
+        }
+    }
+
+    // TODO: need to implement this behaviour, KSEG1 addresses can't access scratchpad.
+    PAddress paddr(const VAddress vAddr) {
+        const u32 addr = vAddr.m_addr;
+        const bool condition = KSEG1_RANGE.contains(addr) ||
+                               KSEG0_RANGE.contains(addr) ||
+                               KUSEG_RANGE.contains(addr);
+        if (condition)
+            return PAddress{~0xE0000000 & addr};
+        else if (KSEG2_RANGE.contains(addr))
+            return PAddress{addr};
         else
-            throw;
+            // BUS ERROR
+            assert(false);
+    }
+
+   public:
+    MMap() {
+        struct stat info;
+        stat("SCPH1001.BIN", &info);
+        if (biosBuffer.size() != info.st_size)
+            throw runtime_error{"size of BIOS is not 512KB"};
+
+        ifstream bios{"SCPH1001.BIN", ios::binary | ios::in};
+        bios.read((char *)biosBuffer.data(), biosBuffer.size());
     }
 
     u32 load32(u32 addr) {
-        assert(addr % 4 == 0);
-        const u32 pAddr = paddr(addr);
-        MemBuffer memBuffer = getMemBuffer(pAddr);
-        span<u8> &buffer = memBuffer.buffer;
-        u32 offset = memBuffer.getOffset(pAddr);
+        VAddress vAddr{addr};
+        const PAddress pAddr = paddr(vAddr);
+        BufferType type = getType(pAddr);
+        span<u8> buffer = getBuffer(type);
+        const u32 offset = getOffset(type, pAddr);
 
-        assert(buffer.size() > offset + 3 && offset >= 0);
+        assert(buffer.size() > offset + 3);
         u32 byte0 = (u32)buffer[offset + 0];
         u32 byte1 = (u32)buffer[offset + 1] << 8;
         u32 byte2 = (u32)buffer[offset + 2] << 16;
@@ -313,46 +322,28 @@ struct Memory {
     }
 
     u16 load16(u32 addr) {
-        assert(addr % 2 == 0);
+        VAddress vAddr{addr};
+        const PAddress pAddr = paddr(vAddr);
+        BufferType type = getType(pAddr);
+        span<u8> buffer = getBuffer(type);
+        const u32 offset = getOffset(type, pAddr);
 
-        const u32 pAddr = paddr(addr);
-        MemBuffer memBuffer = getMemBuffer(pAddr);
-        span<u8> &buffer = memBuffer.buffer;
-        u32 offset = memBuffer.getOffset(pAddr);
-
-        assert(buffer.size() > offset + 1 && offset >= 0);
+        assert(buffer.size() > offset + 1);
         u32 byte0 = (u32)buffer[offset];
         u32 byte1 = (u32)buffer[offset + 1] << 8;
-
         return byte0 | byte1;
     }
 
     u8 load8(u32 addr) {
-        const u32 pAddr = paddr(addr);
-        MemBuffer memBuffer = getMemBuffer(pAddr);
-        span<u8> &buffer = memBuffer.buffer;
-        u32 offset = memBuffer.getOffset(pAddr);
+        VAddress vAddr{addr};
+        const PAddress pAddr = paddr(vAddr);
+        BufferType type = getType(pAddr);
+        span<u8> buffer = getBuffer(type);
+        const u32 offset = getOffset(type, pAddr);
 
-        assert(buffer.size() > offset && offset >= 0);
+        assert(buffer.size() > offset);
         u32 byte0 = (u32)buffer[offset];
         return byte0;
-    }
-
-    u32 store32(u32 addr) {
-
-    }
-
-    // Not implemented: KSEG1 addresses can't access scratchpad.
-    u32 paddr(const u32 addr) {
-        const bool condition = KSEG1_RANGE.contains(addr) || KSEG0_RANGE.contains(addr) || KUSEG_RANGE.contains(addr);
-
-        if (condition)
-            return 0xE0000000 & addr;
-        else if (KSEG2_RANGE.contains(addr))
-            return addr;
-        else
-            // BUS ERROR
-            throw;
     }
 };
 
@@ -387,26 +378,179 @@ struct DecodedOp {
         : newState{newState}, type{type}, dstRegId{dstRegId}, value{value} {}
 };
 
-const DecodedOp ZERO_INSTR = {State::NoLoadDelay, Type::Write, 0, 0};
+// TODO: Use templates for this.
+string getPrimaryOpString(PrimaryOps opcode) {
+    using enum PrimaryOps;
+    switch (opcode) {
+        case SPECIAL:
+            return "SPECIAL";
+        case BCONDZ:
+            return "BCONDZ";
+        case J:
+            return "J";
+        case JAL:
+            return "JAL";
+        case BEQ:
+            return "BEQ";
+        case BNE:
+            return "BNE";
+        case BLEZ:
+            return "BLEZ";
+        case BGTZ:
+            return "BGTZ";
+        case ADDI:
+            return "ADDI";
+        case ADDIU:
+            return "ADDIU";
+        case SLTI:
+            return "SLTI";
+        case SLTIU:
+            return "SLTIU";
+        case ANDI:
+            return "ANDI";
+        case ORI:
+            return "ORI";
+        case XORI:
+            return "XORI";
+        case LUI:
+            return "LUI";
+        case COP0:
+            return "COP0";
+        case COP1:
+            return "COP1";
+        case COP2:
+            return "COP2";
+        case COP3:
+            return "COP3";
+        case LB:
+            return "LB";
+        case LH:
+            return "LH";
+        case LWL:
+            return "LWL";
+        case LW:
+            return "LW";
+        case LBU:
+            return "LBU";
+        case LHU:
+            return "LHU";
+        case LWR:
+            return "LWR";
+        case SB:
+            return "SB";
+        case SH:
+            return "SH";
+        case SWL:
+            return "SWL";
+        case SW:
+            return "SW";
+        case SWR:
+            return "SWR";
+        case LWC0:
+            return "LWC0";
+        case LWC1:
+            return "LWC1";
+        case LWC2:
+            return "LWC2";
+        case LWC3:
+            return "LWC3";
+        case SWC0:
+            return "SWC0";
+        case SWC1:
+            return "SWC1";
+        case SWC2:
+            return "SWC2";
+        case SWC3:
+            return "SWC3";
+    }
+}
+
+string getSecondaryOps(SecondaryOps opcode) {
+    using enum SecondaryOps;
+    switch (opcode) {
+        case SLL:
+            return "SLL";
+        case SRL:
+            return "SRL";
+        case SRA:
+            return "SRA";
+        case SLLV:
+            return "SLLV";
+        case SRLV:
+            return "SRLV";
+        case SRAV:
+            return "SRAV";
+        case JR:
+            return "JR";
+        case JALR:
+            return "JALR";
+        case SYSCALL:
+            return "SYSCALL";
+        case BREAK:
+            return "BREAK";
+        case MFHI:
+            return "MFHI";
+        case MTHI:
+            return "MTHI";
+        case MFLO:
+            return "MFLO";
+        case MTLO:
+            return "MTLO";
+        case MULT:
+            return "MULT";
+        case MULTU:
+            return "MULTU";
+        case DIV:
+            return "DIV";
+        case DIVU:
+            return "DIVU";
+        case ADD:
+            return "ADD";
+        case ADDU:
+            return "ADDU";
+        case SUB:
+            return "SUB";
+        case SUBU:
+            return "SUBU";
+        case AND:
+            return "AND";
+        case OR:
+            return "OR";
+        case XOR:
+            return "XOR";
+        case NOR:
+            return "NOR";
+        case SLT:
+            return "SLT";
+        case SLTU:
+            return "SLTU";
+    }
+}
 
 struct Cpu {
+    constexpr static u32 RESET_VECTOR = 0xBFC00000;
+    const DecodedOp ZERO_INSTR;
     Registers reg;
     COP0 cop0;
-    Memory mem;
+    MMap *mmap;
 
-    Cpu() { reg.pc = mem.BIOS_RANGE.start; }
+    Cpu()
+        : ZERO_INSTR{State::NoLoadDelay, Type::Write, 0, 0}, mmap{new MMap{}} {
+        reg.pc = RESET_VECTOR;
+    }
+    ~Cpu() { delete mmap; }
 
     // This is where all side effects should be.
     void runCpuLoop() {
         DecodedOp prevInstr{ZERO_INSTR};
 
         while (true) {
-            u32 opcode = mem.load32(reg.pc);
+            u32 opcode = mmap->load32(reg.pc);
             try {
                 DecodedOp decodedOp = decode(opcode, prevInstr);
                 assert(decodedOp.dstRegId < reg.gpr.size());
 
-                // NEED TO IMPLEMENT: unless an IRQ occurs between the load and
+                // TODO: unless an IRQ occurs between the load and
                 // next opcode, in that case the load would complete during IRQ
                 // handling, and so, the next opcode would receive the NEW value
                 if (decodedOp.newState == State::NoLoadDelay &&
@@ -515,8 +659,12 @@ struct Cpu {
                             lwr(reg.gpr[rt], reg.gpr[rs], imm16)};
                 }
             default:
-                throw runtime_error{format("invalid opcode: {:032b}, op: {:x}",
-                                           opcode, primaryOp)};
+                throw runtime_error{format(
+                    "Invalid opcode/Not implemented Yet: {:032b}, "
+                    "PrimaryOpcode: {:x}, "
+                    "Instruction: {}",
+                    opcode, primaryOp,
+                    getPrimaryOpString(static_cast<PrimaryOps>(primaryOp)))};
         };
     }
 
@@ -542,9 +690,12 @@ struct Cpu {
             case SUBU:
                 return {State::NoLoadDelay, Type::Write, rd, subu(rs, rt)};
             default:
-                throw runtime_error{
-                    format("invalid opcode: {:032b}, secondaryOp: {:x}", opcode,
-                           secondaryOp)};
+                throw runtime_error{format(
+                    "Invalid opcode/Not implemented Yet: {:032b}, "
+                    "SecondaryOpcode: {:x}, "
+                    "Instruction: {}",
+                    opcode, secondaryOp,
+                    getSecondaryOps(static_cast<SecondaryOps>(secondaryOp)))};
         };
     }
 
@@ -553,7 +704,7 @@ struct Cpu {
     u32 lwr(const u32 dest, const u32 base, const s16 offset) {
         const u32 addr = base + offset;
         const u32 wordAddr = (addr / 4) * 4;
-        const u32 src = mem.load32(wordAddr);
+        const u32 src = mmap->load32(wordAddr);
         const u32 bitLength = (addr - wordAddr + 1) * 8;
         return replaceBitRange(dest, 0, src,
                                static_cast<u32>(bitSize<u32>() - bitLength),
@@ -565,7 +716,7 @@ struct Cpu {
     u32 lwl(const u32 dest, const u32 base, const s16 offset) {
         const u32 addr = base + offset;
         const u32 wordAddr = (addr / 4) * 4;
-        const u32 src = mem.load32(wordAddr);
+        const u32 src = mmap->load32(wordAddr);
         const u32 bitLength = (addr - wordAddr + 1) * 8;
         return replaceBitRange(dest,
                                static_cast<u32>(bitSize<u32>() - bitLength),
@@ -574,28 +725,28 @@ struct Cpu {
 
     u32 lb(const u32 s, const s16 imm16) {
         // implicit sign-extension, this does not work in 1's complement.
-        return static_cast<s8>(mem.load8(s + imm16));
+        return static_cast<s8>(mmap->load8(s + imm16));
     }
 
-    u32 lbu(const u32 s, const s16 imm16) { return mem.load8(s + imm16); }
+    u32 lbu(const u32 s, const s16 imm16) { return mmap->load8(s + imm16); }
 
     // implicit sign-extension, this does not work in 1's complement.
     u32 lh(const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
         if (addr % 2 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
-        return static_cast<s16>(mem.load16(s + imm16));
+        return static_cast<s16>(mmap->load16(s + imm16));
     }
 
     u32 lhu(const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
         if (addr % 2 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
-        return mem.load16(addr);
+        return mmap->load16(addr);
     }
 
     u32 lw(const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
         if (addr % 4 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
-        return mem.load32(s + imm16);
+        return mmap->load32(s + imm16);
     }
 
     u32 addu(u32 rs, u32 rt) {
@@ -634,17 +785,18 @@ struct Cpu {
 };
 
 int main() {
-    Cpu cpu;
-    assert(cpu.replaceBitRange(0b10001, 0, 0b00000, 0, 5) == 0);
-    assert(cpu.replaceBitRange(0b10001, 0, 0b00000, 0, 1) == 0b10000);
-    assert(cpu.replaceBitRange(0b10001, 1, 0b10000, 4, 1) == 0b10011);
-    assert(cpu.replaceBitRange(0x0A'0B'0C'0D, 8, 0x00'01'02'03, 0, 24) ==
-           0x01'02'03'0D);
+    try {
+        Cpu cpu;
+        cpu.runCpuLoop();
+    } catch (const exception &ex) {
+        println("{}", ex.what());
+    } catch (...) {
+        println("uncaught");
+    }
 
-    // try {
-    //     Cpu cpu;
-    //     cpu.runCpuLoop();
-    // } catch (runtime_error &e) {
-    //     cerr << e.what() << endl;
-    // }
+    // assert(cpu.replaceBitRange(0b10001, 0, 0b00000, 0, 5) == 0);
+    // assert(cpu.replaceBitRange(0b10001, 0, 0b00000, 0, 1) == 0b10000);
+    // assert(cpu.replaceBitRange(0b10001, 1, 0b10000, 4, 1) == 0b10011);
+    // assert(cpu.replaceBitRange(0x0A'0B'0C'0D, 8, 0x00'01'02'03, 0, 24) ==
+    //        0x01'02'03'0D);
 }
