@@ -7,11 +7,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <span>
 #include <stdexcept>
 #include <utility>
+#include <variant>
 using namespace std;
 
 using s8 = int8_t;
@@ -279,7 +281,8 @@ class MMap {
         }
     }
 
-    // TODO: need to implement this behaviour, KSEG1 addresses can't access scratchpad.
+    // TODO: need to implement this behaviour, KSEG1 addresses can't access
+    // scratchpad.
     PAddress paddr(const VAddress vAddr) {
         const u32 addr = vAddr.m_addr;
         const bool condition = KSEG1_RANGE.contains(addr) ||
@@ -373,13 +376,19 @@ struct DecodedOp {
     Type type;
     u32 dstRegId;
     u32 value;
+    variant<PrimaryOps, SecondaryOps> opcode;
 
-    DecodedOp(State newState, Type type, u32 dstRegId, u32 value)
-        : newState{newState}, type{type}, dstRegId{dstRegId}, value{value} {}
+    DecodedOp(State newState, Type type, u32 dstRegId, u32 value,
+              variant<PrimaryOps, SecondaryOps> opcode)
+        : newState{newState},
+          type{type},
+          dstRegId{dstRegId},
+          value{value},
+          opcode{opcode} {}
 };
 
-// TODO: Use templates for this.
-string getPrimaryOpString(PrimaryOps opcode) {
+
+string getPrimaryOpString(const PrimaryOps opcode) {
     using enum PrimaryOps;
     switch (opcode) {
         case SPECIAL:
@@ -527,6 +536,24 @@ string getSecondaryOps(SecondaryOps opcode) {
     }
 }
 
+string getOpcodeString(const variant<PrimaryOps, SecondaryOps> &opcode) {
+    if (auto op = get_if<PrimaryOps>(&opcode))
+        return getPrimaryOpString(*op);
+    else
+        return getSecondaryOps(get<SecondaryOps>(opcode));
+}
+
+template <>
+struct formatter<DecodedOp> {
+    constexpr auto parse(std::format_parse_context& ctx) {
+        return ctx.begin();
+    }
+
+    auto format(const DecodedOp &instr, auto &ctx) const {
+        return format_to(ctx.out(), "opcode {}: ${}={}",  getOpcodeString(instr.opcode), instr.dstRegId, instr.value);
+    }
+};
+
 struct Cpu {
     constexpr static u32 RESET_VECTOR = 0xBFC00000;
     const DecodedOp ZERO_INSTR;
@@ -535,7 +562,8 @@ struct Cpu {
     MMap *mmap;
 
     Cpu()
-        : ZERO_INSTR{State::NoLoadDelay, Type::Write, 0, 0}, mmap{new MMap{}} {
+        : ZERO_INSTR{State::NoLoadDelay, Type::Write, 0, 0, SecondaryOps::ADD},
+          mmap{new MMap{}} {
         reg.pc = RESET_VECTOR;
     }
     ~Cpu() { delete mmap; }
@@ -549,6 +577,7 @@ struct Cpu {
             try {
                 DecodedOp decodedOp = decode(opcode, prevInstr);
                 assert(decodedOp.dstRegId < reg.gpr.size());
+                println("{}", decodedOp);
 
                 // TODO: unless an IRQ occurs between the load and
                 // next opcode, in that case the load would complete during IRQ
@@ -627,36 +656,36 @@ struct Cpu {
         switch (static_cast<PrimaryOps>(primaryOp)) {
             case LB:
                 return {State::LoadDelay, Type::Write, rt,
-                        lb(reg.gpr[rs], imm16)};
+                        lb(reg.gpr[rs], imm16), LB};
             case LH:
                 return {State::LoadDelay, Type::Write, rt,
-                        lh(reg.gpr[rs], imm16)};
+                        lh(reg.gpr[rs], imm16), LH};
             case LWL:
                 if (prevInstr.newState == State::SpecialLoadDelay &&
                     prevInstr.dstRegId == rt) {
                     return {State::SpecialLoadDelay, Type::Write, rt,
-                            lwl(prevInstr.value, reg.gpr[rs], imm16)};
+                            lwl(prevInstr.value, reg.gpr[rs], imm16), LWL};
                 } else {
                     return {State::SpecialLoadDelay, Type::Write, rt,
-                            lwl(reg.gpr[rt], reg.gpr[rs], imm16)};
+                            lwl(reg.gpr[rt], reg.gpr[rs], imm16), LWL};
                 }
             case LW:
                 return {State::LoadDelay, Type::Write, rt,
-                        lw(reg.gpr[rs], imm16)};
+                        lw(reg.gpr[rs], imm16), LW};
             case LBU:
                 return {State::LoadDelay, Type::Write, rt,
-                        lbu(reg.gpr[rs], imm16)};
+                        lbu(reg.gpr[rs], imm16), LBU};
             case LHU:
                 return {State::LoadDelay, Type::Write, rt,
-                        lhu(reg.gpr[rs], imm16)};
+                        lhu(reg.gpr[rs], imm16), LHU};
             case LWR:
                 if (prevInstr.newState == State::SpecialLoadDelay &&
                     prevInstr.dstRegId == rt) {
                     return {State::SpecialLoadDelay, Type::Write, rt,
-                            lwr(prevInstr.value, reg.gpr[rs], imm16)};
+                            lwr(prevInstr.value, reg.gpr[rs], imm16), LWR};
                 } else {
                     return {State::SpecialLoadDelay, Type::Write, rt,
-                            lwr(reg.gpr[rt], reg.gpr[rs], imm16)};
+                            lwr(reg.gpr[rt], reg.gpr[rs], imm16), LWR};
                 }
             default:
                 throw runtime_error{format(
@@ -681,14 +710,16 @@ struct Cpu {
         switch (static_cast<SecondaryOps>(secondaryOp)) {
             case ADD:
                 return {State::NoLoadDelay, Type::Write, rd,
-                        static_cast<u32>(add(rs, rt))};
+                        static_cast<u32>(add(rs, rt)), ADD};
             case ADDU:
-                return {State::NoLoadDelay, Type::Write, rd, addu(rs, rt)};
+                return {State::NoLoadDelay, Type::Write, rd, addu(rs, rt),
+                        ADDU};
             case SUB:
                 return {State::NoLoadDelay, Type::Write, rd,
-                        static_cast<u32>(sub(rs, rt))};
+                        static_cast<u32>(sub(rs, rt)), SUB};
             case SUBU:
-                return {State::NoLoadDelay, Type::Write, rd, subu(rs, rt)};
+                return {State::NoLoadDelay, Type::Write, rd, subu(rs, rt),
+                        SUBU};
             default:
                 throw runtime_error{format(
                     "Invalid opcode/Not implemented Yet: {:032b}, "
