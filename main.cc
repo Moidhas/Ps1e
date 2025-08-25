@@ -1,6 +1,7 @@
 #include <sys/stat.h>
 
 #include <array>
+#include <bitset>
 #include <cassert>
 #include <climits>
 #include <concepts>
@@ -157,48 +158,158 @@ struct Registers {
     u32 lo = 0;
 };
 
+// TODO: Combine the range with buffer.
 struct Range {
-    const u32 start;
-    const u32 length;
-    constexpr Range(const u32 start, const u32 length)
-        : start{start}, length{length} {}
+    u32 start;
+    u32 byteLength;
+    const u32 mirrorMask;
+    constexpr Range(const u32 start, const u32 byteLength, const u32 mirrorMask = 0xFFFF'FFFF)
+        : start{start}, byteLength{byteLength}, mirrorMask{mirrorMask} {}
 
     constexpr bool contains(const u32 addr) const {
-        if (length == 0) return false;
-        return start <= addr && addr <= start + (length - 1);
+        if (byteLength == 0) return false;
+        return start <= addr && addr <= start + (byteLength - 1);
     }
 
     constexpr u32 getOffset(const u32 addr) const {
         assert(contains(addr));
-        return addr - start;
+        return (addr & mirrorMask) - start;
     }
 };
 
+// Source: https://psx-spx.consoledev.net/iomap/
+struct MemCtrl1 {
+    array<u32, 9> reg;
+
+    MemCtrl1() : reg{0} {}
+
+    enum class Register {
+        E1_BASE_ADDR,
+        E2_BASE_ADDR,
+        E1_DELAY,
+        E3_DELAY,
+        BIOS_DELAY,
+        SPU_DELAY,
+        CDROM_DELAY,
+        E2_DELAY,
+        COM_DELAY,
+    };
+
+    u32 getRegister(const u32 offset) {
+        const u32 idx = offset % 4;
+        assert(idx < reg.size());
+        return reg[idx];
+    }
+
+    void writeRegister(const u32 offset, const u32 value) {
+        const u32 idx = offset / 4;
+        assert(idx < reg.size());
+        using enum Register;
+        switch (static_cast<Register>(idx)) {
+            case E1_BASE_ADDR:
+                writeE1BaseAddr(value);
+                break;
+            case E2_BASE_ADDR:
+                writeE2BaseAddr(value);
+            case E1_DELAY:
+                writeE1Delay(value);
+                break;
+            case E3_DELAY:
+                writeE3Delay(value);
+                break;
+            case BIOS_DELAY:
+                writeBIOSDelay(value);
+                break;
+            case SPU_DELAY:
+                writeSPUDelay(value);
+                break;
+            case CDROM_DELAY:
+                writeCDROMDelay(value);
+                break;
+            case E2_DELAY:
+                writeE2Delay(value);
+                break;
+            case COM_DELAY:
+                writeCOMDelay(value);
+                break;
+        }
+    }
+
+    void writeE1BaseAddr(const u32 value) {
+        // TODO: No support for expanding expansion, and changing the base
+        // address.
+        println("E1BaseAddr IO register {:X}", value);
+        assert(false);
+    }
+
+    void writeE2BaseAddr(const u32 value) { assert(false); }
+
+    void writeE1Delay(const u32 value) { assert(false); }
+
+    void writeE3Delay(const u32 value) { assert(false); }
+
+    void writeBIOSDelay(const u32 value) {
+        const u8 idx{static_cast<u8>(Register::BIOS_DELAY)};
+        reg[idx] = value;
+    }
+
+    void writeSPUDelay(const u32 value) { assert(false); }
+
+    void writeCDROMDelay(const u32 value) { assert(false); }
+
+    void writeE2Delay(const u32 value) { assert(false); }
+
+    void writeCOMDelay(const u32 value) { assert(false); }
+};
+
+struct MemCtrl2 {
+    u32 ramSize;
+    MemCtrl2() : ramSize{0} {}
+};
+
+// TODO: Add operator overloads for V/PAddress to make everything use
+// V/PAddress.
+// TODO: Find a better way to address stuff, so that you can get an address modified specifc 
+// to any Range. Need to do this for ram mirroring.
 class MMap {
     // User Memory: KUSEG is intended to contain 2GB virtual memory (on extended
     // MIPS processors), the PSX doesn't support virtual memory, and KUSEG
     // simply contains a mirror of KSEG0/KSEG1 (in the first 512MB) (trying to
     // access memory in the remaining 1.5GB causes an exception).
     // source: https://psx-spx.consoledev.net/memorymap/#write-queue
-    constexpr static Range KUSEG_RANGE{0x00000000, 512 * MB};
-    constexpr static Range KSEG0_RANGE{0x80000000, 512 * MB};
-    constexpr static Range KSEG1_RANGE{0xA0000000, 512 * MB};
-    constexpr static Range KSEG2_RANGE{0xC0000000, GB};
-    constexpr static Range PRAM_RANGE{0x00000000, 2 * MB};
-    constexpr static Range PE1_RANGE{0x1F000000, 8 * MB};
-    constexpr static Range PSCRATCHPAD_RANGE{0x1F800000, KB};
-    constexpr static Range PIO_RANGE{0x1F801000, 4 * KB};
-    constexpr static Range PE2_RANGE{0x1F802000, 8 * KB};
-    constexpr static Range PE3_RANGE{0x1FA00000, 2 * MB};
-    constexpr static Range PBIOS_RANGE{0x1FC00000, 512 * KB};
+    //
+    //
+    static constexpr Range KUSEG_RANGE{0x00000000, 512 * MB};
+    static constexpr Range KSEG0_RANGE{0x80000000, 512 * MB};
+    static constexpr Range KSEG1_RANGE{0xA0000000, 512 * MB};
+    static constexpr Range KSEG2_RANGE{0xC0000000, GB};
 
-    array<u8, PRAM_RANGE.length> ramBuffer;
-    array<u8, PE1_RANGE.length> e1Buffer;
-    array<u8, PSCRATCHPAD_RANGE.length> scratchpadBuffer;
-    array<u8, PIO_RANGE.length> ioBuffer;
-    array<u8, PE2_RANGE.length> e2Buffer;
-    array<u8, PE3_RANGE.length> e3Buffer;
-    array<u8, PBIOS_RANGE.length> biosBuffer;
+    // TODO: No support for 8 MB ram, mirrored to 2 MB.
+    Range RAM_RANGE{0x00000000, 2 * MB, 2 * MB - 1};
+    array<u8, 2 * MB> ramBuffer;
+
+    // TODO: No support for expanding expansion, and changing the base address.
+    static constexpr Range E1_RANGE{0x1F000000, 512 * KB};
+    array<u8, 512 * KB> e1Buffer;
+
+    static constexpr Range SCRATCHPAD_RANGE{0x1F800000, KB};
+    array<u8, SCRATCHPAD_RANGE.byteLength> scratchpadBuffer;
+
+    static constexpr Range IO_RANGE{0x1F801000, 4 * KB};
+    static constexpr Range MEM_CTRL1_RANGE{0x1F801000, 36};
+    MemCtrl1 memCtrl1;
+    static constexpr Range MEM_CTRL2_RANGE{0x1F801060, 4};
+    MemCtrl2 memCtrl2;
+
+    // TODO: change since, not actually buffer.
+    Range E2_RANGE{0x1F802000, 8 * KB};
+    array<u8, 8 * KB> e2Buffer;
+
+    static constexpr Range E3_RANGE{0x1FA00000, 2 * MB};
+    array<u8, 2 * MB> e3Buffer;
+
+    Range BIOS_RANGE{0x1FC00000, 512 * KB};
+    array<u8, 512 * KB> biosBuffer;
 
     struct VAddress {
         u32 m_addr;
@@ -217,7 +328,7 @@ class MMap {
         Bios,
     };
 
-    span<u8> getBuffer(BufferType type) {
+    span<const u8> getReadBuffer(BufferType type) {
         using enum BufferType;
         switch (type) {
             case Ram:
@@ -226,35 +337,93 @@ class MMap {
                 return e1Buffer;
             case Scratchpad:
                 return scratchpadBuffer;
-            case Io:
-                return ioBuffer;
             case E2:
                 return e2Buffer;
             case E3:
                 return e3Buffer;
             case Bios:
                 return biosBuffer;
+            case Io:
+                assert(false);
+        }
+    }
+
+    u32 getIoReg(const PAddress pAddr) {
+        const u32 addr = pAddr.m_addr;
+        if (MEM_CTRL1_RANGE.contains(addr)) {
+            return memCtrl1.getRegister(MEM_CTRL1_RANGE.getOffset(addr));
+        } else if (MEM_CTRL2_RANGE.contains(addr)) {
+            return memCtrl2.ramSize;
+        } else {
+            assert(false);
+        }
+    }
+
+    void writeIoReg(const PAddress pAddr, const u32 value) {
+        const u32 addr = pAddr.m_addr;
+        println("Address= {:X}", addr);
+        if (MEM_CTRL1_RANGE.contains(addr)) {
+            memCtrl1.writeRegister(MEM_CTRL1_RANGE.getOffset(addr), value);
+        } else if (MEM_CTRL2_RANGE.contains(addr)) {
+            const bitset<32> bits = value;
+            const u8 ramRangeChoice = (bits[11] << 1) | bits[9];
+            const array<u8, 4> ramSizes{1, 4, 2, 8};
+            RAM_RANGE.byteLength = ramSizes[ramRangeChoice];
+            memCtrl2.ramSize = value;
+        } else {
+            assert(false);
+        }
+    }
+
+    span<u8> getWriteBuffer(BufferType type) {
+        using enum BufferType;
+        switch (type) {
+            case Ram:
+                return ramBuffer;
+            case E1:
+                return e1Buffer;
+            case Scratchpad:
+                return scratchpadBuffer;
+            case E2:
+                return e2Buffer;
+            case E3:
+                return e3Buffer;
+            case Io:
+                assert(false);
+            case Bios:
+                assert(false);
         }
     }
 
     BufferType getType(const PAddress pAddr) {
         const u32 addr = pAddr.m_addr;
         using enum BufferType;
-        if (PRAM_RANGE.contains(addr))
+        if (RAM_RANGE.contains(addr)) {
+            println("RAM");
+            assert(false);
             return Ram;
-        else if (PE1_RANGE.contains(addr))
+        } else if (E1_RANGE.contains(addr)) {
+            println("E1");
+            assert(false);
             return E1;
-        else if (PSCRATCHPAD_RANGE.contains(addr))
+        } else if (SCRATCHPAD_RANGE.contains(addr)) {
+            println("SCRATCHPAD_RANGE");
+            assert(false);
             return Scratchpad;
-        else if (PIO_RANGE.contains(addr))
+        } else if (IO_RANGE.contains(addr)) {
+            println("IO_RANGE");
             return Io;
-        else if (PE2_RANGE.contains(addr))
+        } else if (E2_RANGE.contains(addr)) {
+            println("E2_RANGE");
+            assert(false);
             return E2;
-        else if (PE3_RANGE.contains(addr))
+        } else if (E3_RANGE.contains(addr)) {
+            println("E3_RANGE");
+            assert(false);
             return E3;
-        else if (PBIOS_RANGE.contains(addr))
+        } else if (BIOS_RANGE.contains(addr)) {
             return Bios;
-        else {
+        } else {
             println("{:X}", addr);
             assert(false);
         }
@@ -265,19 +434,19 @@ class MMap {
         using enum BufferType;
         switch (type) {
             case Ram:
-                return PRAM_RANGE.getOffset(addr);
+                return RAM_RANGE.getOffset(addr);
             case E1:
-                return PE1_RANGE.getOffset(addr);
+                return E1_RANGE.getOffset(addr);
             case Scratchpad:
-                return PSCRATCHPAD_RANGE.getOffset(addr);
+                return SCRATCHPAD_RANGE.getOffset(addr);
             case Io:
-                return PIO_RANGE.getOffset(addr);
+                return IO_RANGE.getOffset(addr);
             case E2:
-                return PE2_RANGE.getOffset(addr);
+                return E2_RANGE.getOffset(addr);
             case E3:
-                return PE3_RANGE.getOffset(addr);
+                return E3_RANGE.getOffset(addr);
             case Bios:
-                return PBIOS_RANGE.getOffset(addr);
+                return BIOS_RANGE.getOffset(addr);
         }
     }
 
@@ -288,9 +457,12 @@ class MMap {
         const bool condition = KSEG1_RANGE.contains(addr) ||
                                KSEG0_RANGE.contains(addr) ||
                                KUSEG_RANGE.contains(addr);
-        if (condition)
-            return PAddress{~0xE0000000 & addr};
-        else if (KSEG2_RANGE.contains(addr))
+        if (condition) {
+            const u32 pAddr{~0xE0000000 & addr};
+            assert(!(KSEG1_RANGE.contains(addr) &&
+                     SCRATCHPAD_RANGE.contains(pAddr)));
+            return PAddress{pAddr};
+        } else if (KSEG2_RANGE.contains(addr))
             return PAddress{addr};
         else
             // BUS ERROR
@@ -312,9 +484,9 @@ class MMap {
         VAddress vAddr{addr};
         const PAddress pAddr = paddr(vAddr);
         BufferType type = getType(pAddr);
-        span<u8> buffer = getBuffer(type);
-        const u32 offset = getOffset(type, pAddr);
 
+        span<const u8> buffer = getReadBuffer(type);
+        const u32 offset = getOffset(type, pAddr);
         assert(buffer.size() > offset + 3);
         u32 byte0 = (u32)buffer[offset + 0];
         u32 byte1 = (u32)buffer[offset + 1] << 8;
@@ -328,7 +500,7 @@ class MMap {
         VAddress vAddr{addr};
         const PAddress pAddr = paddr(vAddr);
         BufferType type = getType(pAddr);
-        span<u8> buffer = getBuffer(type);
+        span<const u8> buffer = getReadBuffer(type);
         const u32 offset = getOffset(type, pAddr);
 
         assert(buffer.size() > offset + 1);
@@ -341,12 +513,75 @@ class MMap {
         VAddress vAddr{addr};
         const PAddress pAddr = paddr(vAddr);
         BufferType type = getType(pAddr);
-        span<u8> buffer = getBuffer(type);
+        span<const u8> buffer = getReadBuffer(type);
         const u32 offset = getOffset(type, pAddr);
 
         assert(buffer.size() > offset);
         u32 byte0 = (u32)buffer[offset];
         return byte0;
+    }
+
+    // TODO: During an 8-bit or 16-bit store, all 32 bits of the GPR are placed
+    // on the bus. As such, when writing to certain 32-bit IO registers with an
+    // 8 or 16-bit store, it will behave like a 32-bit store, using the
+    // register's full value. The soundscope on some shells is known to rely on
+    // this, as it uses sh to write to certain DMA registers. If this is not
+    // properly emulated, the soundscope will hang, waiting for an interrupt
+    // that will never be fired.
+    void store32(const u32 addr, const u32 value) {
+        const VAddress vAddr{addr};
+        const PAddress pAddr = paddr(vAddr);
+        const BufferType type = getType(pAddr);
+
+        if (type == BufferType::Io) {
+            writeIoReg(pAddr, value);
+            return;
+        }
+
+        span<u8> buffer = getWriteBuffer(type);
+        const u32 offset = getOffset(type, pAddr);
+
+        assert(buffer.size() > offset + 3);
+        buffer[0] = value & 0x00'00'00'FF;
+        buffer[1] = value & 0x00'00'FF'00;
+        buffer[2] = value & 0x00'FF'00'00;
+        buffer[3] = value & 0xFF'00'00'00;
+    }
+
+    void store16(const u32 addr, const u32 value) {
+        const VAddress vAddr{addr};
+        const PAddress pAddr = paddr(vAddr);
+        const BufferType type = getType(pAddr);
+
+        if (type == BufferType::Io) {
+            writeIoReg(pAddr, value);
+            return;
+        }
+
+        span<u8> buffer = getWriteBuffer(type);
+        const u32 offset = getOffset(type, pAddr);
+
+        assert(buffer.size() > offset + 1);
+
+        buffer[0] = value & 0x00'00'00'FF;
+        buffer[1] = value & 0x00'00'FF'00;
+    }
+
+    void store8(const u32 addr, const u32 value) {
+        const VAddress vAddr{addr};
+        const PAddress pAddr = paddr(vAddr);
+        const BufferType type = getType(pAddr);
+
+        if (type == BufferType::Io) {
+            writeIoReg(pAddr, value);
+            return;
+        }
+
+        span<u8> buffer = getWriteBuffer(type);
+        const u32 offset = getOffset(type, pAddr);
+
+        assert(buffer.size() > offset);
+        buffer[0] = value & 0x00'00'00'FF;
     }
 };
 
@@ -369,24 +604,23 @@ struct COP0 {
 
 enum class State { NoLoadDelay, SpecialLoadDelay, LoadDelay, OverWritten };
 
-enum class Type { Write, Branch };
+enum class Type { Write, Branch, Store };
 
 struct DecodedOp {
     State newState;
     Type type;
-    u32 dstRegId;
+    u32 dst;  // means different things depending on type.
     u32 value;
     variant<PrimaryOps, SecondaryOps> opcode;
 
-    DecodedOp(State newState, Type type, u32 dstRegId, u32 value,
+    DecodedOp(State newState, Type type, u32 dst, u32 value,
               variant<PrimaryOps, SecondaryOps> opcode)
         : newState{newState},
           type{type},
-          dstRegId{dstRegId},
+          dst{dst},
           value{value},
           opcode{opcode} {}
 };
-
 
 string getPrimaryOpString(const PrimaryOps opcode) {
     using enum PrimaryOps;
@@ -545,12 +779,21 @@ string getOpcodeString(const variant<PrimaryOps, SecondaryOps> &opcode) {
 
 template <>
 struct formatter<DecodedOp> {
-    constexpr auto parse(std::format_parse_context& ctx) {
-        return ctx.begin();
-    }
+    constexpr auto parse(std::format_parse_context &ctx) { return ctx.begin(); }
 
     auto format(const DecodedOp &instr, auto &ctx) const {
-        return format_to(ctx.out(), "opcode {}: ${}={}",  getOpcodeString(instr.opcode), instr.dstRegId, instr.value);
+        const string opcodeString = getOpcodeString(instr.opcode);
+        switch (instr.type) {
+            case Type::Write:
+                return format_to(ctx.out(), "opcode {}: ${}={}", opcodeString,
+                                 instr.dst, instr.value);
+            case Type::Store:
+                return format_to(ctx.out(), "opcode {}: [{:X}]={:X}",
+                                 opcodeString, instr.dst, instr.value);
+            case Type::Branch:
+                return format_to(ctx.out(), "opcode {}: ${}={}", opcodeString,
+                                 instr.dst, instr.value);
+        }
     }
 };
 
@@ -573,10 +816,11 @@ struct Cpu {
         DecodedOp prevInstr{ZERO_INSTR};
 
         while (true) {
-            u32 opcode = mmap->load32(reg.pc);
             try {
+                u32 opcode = mmap->load32(reg.pc);
                 DecodedOp decodedOp = decode(opcode, prevInstr);
-                assert(decodedOp.dstRegId < reg.gpr.size());
+                if (decodedOp.type == Type::Write)
+                    assert(decodedOp.dst < reg.gpr.size());
                 println("{}", decodedOp);
 
                 // TODO: unless an IRQ occurs between the load and
@@ -584,16 +828,16 @@ struct Cpu {
                 // handling, and so, the next opcode would receive the NEW value
                 if (decodedOp.newState == State::NoLoadDelay &&
                     decodedOp.type == Type::Write) {
-                    reg.gpr[decodedOp.dstRegId] = decodedOp.value;
+                    reg.gpr[decodedOp.dst] = decodedOp.value;
 
-                    if (prevInstr.dstRegId == decodedOp.dstRegId) {
+                    if (prevInstr.dst == decodedOp.dst) {
                         prevInstr.newState = State::OverWritten;
                     }
                 }
 
                 if (prevInstr.newState == State::LoadDelay ||
                     prevInstr.newState == State::SpecialLoadDelay) {
-                    reg.gpr[prevInstr.dstRegId] = prevInstr.value;
+                    reg.gpr[prevInstr.dst] = prevInstr.value;
                 }
 
                 reg.pc += 4;
@@ -654,6 +898,12 @@ struct Cpu {
 
         using enum PrimaryOps;
         switch (static_cast<PrimaryOps>(primaryOp)) {
+            case ADDIU:
+                return {State::NoLoadDelay, Type::Write, rt,
+                        addiu(reg.gpr[rs], imm16), ADDIU};
+            case ADDI:
+                return {State::NoLoadDelay, Type::Write, rt,
+                        static_cast<u32>(addi(reg.gpr[rs], imm16)), ADDI};
             case LB:
                 return {State::LoadDelay, Type::Write, rt,
                         lb(reg.gpr[rs], imm16), LB};
@@ -662,7 +912,7 @@ struct Cpu {
                         lh(reg.gpr[rs], imm16), LH};
             case LWL:
                 if (prevInstr.newState == State::SpecialLoadDelay &&
-                    prevInstr.dstRegId == rt) {
+                    prevInstr.dst == rt) {
                     return {State::SpecialLoadDelay, Type::Write, rt,
                             lwl(prevInstr.value, reg.gpr[rs], imm16), LWL};
                 } else {
@@ -680,13 +930,27 @@ struct Cpu {
                         lhu(reg.gpr[rs], imm16), LHU};
             case LWR:
                 if (prevInstr.newState == State::SpecialLoadDelay &&
-                    prevInstr.dstRegId == rt) {
+                    prevInstr.dst == rt) {
                     return {State::SpecialLoadDelay, Type::Write, rt,
                             lwr(prevInstr.value, reg.gpr[rs], imm16), LWR};
                 } else {
                     return {State::SpecialLoadDelay, Type::Write, rt,
                             lwr(reg.gpr[rt], reg.gpr[rs], imm16), LWR};
                 }
+            case SW:
+                return {State::NoLoadDelay, Type::Store,
+                        sw(reg.gpr[rt], reg.gpr[rs], imm16), reg.gpr[rt], SW};
+            case SH:
+                return {State::NoLoadDelay, Type::Store,
+                        sh(reg.gpr[rt], reg.gpr[rs], imm16), reg.gpr[rt], SH};
+            case SB:
+                return {State::NoLoadDelay, Type::Store,
+                        sb(reg.gpr[rt], reg.gpr[rs], imm16), reg.gpr[rt], SB};
+            case LUI:
+                return {State::NoLoadDelay, Type::Write, rt, lui(imm16), LUI};
+            case ORI:
+                return {State::NoLoadDelay, Type::Write, rt,
+                        ori(reg.gpr[rs], imm16), ORI};
             default:
                 throw runtime_error{format(
                     "Invalid opcode/Not implemented Yet: {:032b}, "
@@ -710,16 +974,19 @@ struct Cpu {
         switch (static_cast<SecondaryOps>(secondaryOp)) {
             case ADD:
                 return {State::NoLoadDelay, Type::Write, rd,
-                        static_cast<u32>(add(rs, rt)), ADD};
+                        static_cast<u32>(add(reg.gpr[rs], reg.gpr[rt])), ADD};
             case ADDU:
-                return {State::NoLoadDelay, Type::Write, rd, addu(rs, rt),
-                        ADDU};
+                return {State::NoLoadDelay, Type::Write, rd,
+                        addu(reg.gpr[rs], reg.gpr[rt]), ADDU};
             case SUB:
                 return {State::NoLoadDelay, Type::Write, rd,
-                        static_cast<u32>(sub(rs, rt)), SUB};
+                        static_cast<u32>(sub(reg.gpr[rs], reg.gpr[rt])), SUB};
             case SUBU:
-                return {State::NoLoadDelay, Type::Write, rd, subu(rs, rt),
-                        SUBU};
+                return {State::NoLoadDelay, Type::Write, rd,
+                        subu(reg.gpr[rs], reg.gpr[rt]), SUBU};
+            case SLL:
+                return {State::NoLoadDelay, Type::Write, rd,
+                        sll(reg.gpr[rt], imm5), SLL};
             default:
                 throw runtime_error{format(
                     "Invalid opcode/Not implemented Yet: {:032b}, "
@@ -729,6 +996,34 @@ struct Cpu {
                     getSecondaryOps(static_cast<SecondaryOps>(secondaryOp)))};
         };
     }
+
+    u32 sw(const u32 value, const u32 s, const s16 imm16) {
+        const u32 addr = s + imm16;
+        if (addr % 4 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
+        mmap->store32(addr, value);
+        return addr;
+    }
+
+    u32 sh(const u32 value, const u32 s, const s16 imm16) {
+        const u32 addr = s + imm16;
+        if (addr % 2 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
+        mmap->store16(addr, value);
+        return addr;
+    }
+
+    u32 sb(const u32 value, const u32 s, const s16 imm16) {
+        const u32 addr = s + imm16;
+        mmap->store8(addr, value);
+        return addr;
+    }
+
+    u32 sll(const u32 t, const u8 imm5) { return t << imm5; }
+
+    u32 ori(const u32 s, const u16 imm16) noexcept {
+        return s | static_cast<u32>(imm16);
+    }
+
+    u32 lui(const u16 imm16) noexcept { return static_cast<u32>(imm16) << 16; }
 
     // Reads the most significant bytes of the source into the least
     // significant bytes of the destination.
@@ -780,16 +1075,19 @@ struct Cpu {
         return mmap->load32(s + imm16);
     }
 
-    u32 addu(u32 rs, u32 rt) {
-        const u32 s = reg.gpr[rs];
-        const u32 t = reg.gpr[rt];
-        return s + t;
+    s32 addi(const s32 s, const s16 imm16) {
+        if ((s > 0 && imm16 > INT_MAX - s) || (s < 0 && imm16 < INT_MIN - s)) {
+            throw MipsException{ExcCode::Ov, reg.pc};
+        }
+
+        return s + imm16;
     }
 
-    s32 add(u32 rs, u32 rt) {
-        const s32 s = reg.gpr[rs];
-        const s32 t = reg.gpr[rt];
+    u32 addiu(const u32 s, const s16 imm16) { return s + imm16; }
 
+    u32 addu(const u32 s, const u32 t) { return s + t; }
+
+    s32 add(const s32 s, const s32 t) {
         if ((s > 0 && t > INT_MAX - s) || (s < 0 && t < INT_MIN - s)) {
             throw MipsException{ExcCode::Ov, reg.pc};
         }
@@ -797,16 +1095,9 @@ struct Cpu {
         return s + t;
     }
 
-    u32 subu(u32 rs, u32 rt) {
-        const u32 s = reg.gpr[rs];
-        const u32 t = reg.gpr[rt];
-        return s - t;
-    }
+    u32 subu(const u32 s, const u32 t) { return s - t; }
 
-    s32 sub(u32 rs, u32 rt) {
-        const s32 s = reg.gpr[rs];
-        const s32 t = reg.gpr[rt];
-
+    s32 sub(const s32 s, const s32 t) {
         if ((t > 0 && s < INT_MIN + t) || (t < 0 && s > INT_MAX + t)) {
             throw MipsException{ExcCode::Ov, reg.pc};
         }
