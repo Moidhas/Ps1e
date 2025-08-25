@@ -163,7 +163,8 @@ struct Range {
     u32 start;
     u32 byteLength;
     const u32 mirrorMask;
-    constexpr Range(const u32 start, const u32 byteLength, const u32 mirrorMask = 0xFFFF'FFFF)
+    constexpr Range(const u32 start, const u32 byteLength,
+                    const u32 mirrorMask = 0xFFFF'FFFF)
         : start{start}, byteLength{byteLength}, mirrorMask{mirrorMask} {}
 
     constexpr bool contains(const u32 addr) const {
@@ -238,7 +239,6 @@ struct MemCtrl1 {
     void writeE1BaseAddr(const u32 value) {
         // TODO: No support for expanding expansion, and changing the base
         // address.
-        println("E1BaseAddr IO register {:X}", value);
         assert(false);
     }
 
@@ -269,8 +269,8 @@ struct MemCtrl2 {
 
 // TODO: Add operator overloads for V/PAddress to make everything use
 // V/PAddress.
-// TODO: Find a better way to address stuff, so that you can get an address modified specifc 
-// to any Range. Need to do this for ram mirroring.
+// TODO: Find a better way to address stuff, so that you can get an address
+// modified specifc to any Range. Need to do this for ram mirroring.
 class MMap {
     // User Memory: KUSEG is intended to contain 2GB virtual memory (on extended
     // MIPS processors), the PSX doesn't support virtual memory, and KUSEG
@@ -361,7 +361,6 @@ class MMap {
 
     void writeIoReg(const PAddress pAddr, const u32 value) {
         const u32 addr = pAddr.m_addr;
-        println("Address= {:X}", addr);
         if (MEM_CTRL1_RANGE.contains(addr)) {
             memCtrl1.writeRegister(MEM_CTRL1_RANGE.getOffset(addr), value);
         } else if (MEM_CTRL2_RANGE.contains(addr)) {
@@ -604,22 +603,47 @@ struct COP0 {
 
 enum class State { NoLoadDelay, SpecialLoadDelay, LoadDelay, OverWritten };
 
-enum class Type { Write, Branch, Store };
+enum class Type { Load, Write, Branch, Store };
+
+struct LoadDecodedOp {
+    u32 dstRegId;
+    u32 value;
+    u32 addr;
+    LoadDecodedOp(u32 dstRegId, u32 value, u32 addr)
+        : dstRegId{dstRegId}, value{value}, addr{addr} {}
+};
+
+struct WriteDecodedOp {
+    u32 dstRegId;
+    u32 value;
+    WriteDecodedOp(u32 dstRegId, u32 value)
+        : dstRegId{dstRegId}, value{value} {}
+};
+
+struct BranchDecodedOp {
+    u32 pc;
+    BranchDecodedOp(const u32 pc) : pc{pc} {}
+};
+
+struct StoreDecodedOp {
+    u32 value;
+    u32 dstAddr;
+    StoreDecodedOp(u32 value, u32 dstAddr) : value{value}, dstAddr{dstAddr} {}
+};
 
 struct DecodedOp {
     State newState;
-    Type type;
-    u32 dst;  // means different things depending on type.
-    u32 value;
+    u32 pc;
+    variant<LoadDecodedOp, WriteDecodedOp, BranchDecodedOp, StoreDecodedOp>
+        instr;
     variant<PrimaryOps, SecondaryOps> opcode;
 
-    DecodedOp(State newState, Type type, u32 dst, u32 value,
-              variant<PrimaryOps, SecondaryOps> opcode)
-        : newState{newState},
-          type{type},
-          dst{dst},
-          value{value},
-          opcode{opcode} {}
+    DecodedOp(
+        State newState, u32 pc,
+        variant<LoadDecodedOp, WriteDecodedOp, BranchDecodedOp, StoreDecodedOp>
+            instr,
+        variant<PrimaryOps, SecondaryOps> opcode)
+        : newState{newState}, pc{pc}, instr{instr}, opcode{opcode} {}
 };
 
 string getPrimaryOpString(const PrimaryOps opcode) {
@@ -781,18 +805,23 @@ template <>
 struct formatter<DecodedOp> {
     constexpr auto parse(std::format_parse_context &ctx) { return ctx.begin(); }
 
-    auto format(const DecodedOp &instr, auto &ctx) const {
-        const string opcodeString = getOpcodeString(instr.opcode);
-        switch (instr.type) {
-            case Type::Write:
-                return format_to(ctx.out(), "opcode {}: ${}={}", opcodeString,
-                                 instr.dst, instr.value);
-            case Type::Store:
-                return format_to(ctx.out(), "opcode {}: [{:X}]={:X}",
-                                 opcodeString, instr.dst, instr.value);
-            case Type::Branch:
-                return format_to(ctx.out(), "opcode {}: ${}={}", opcodeString,
-                                 instr.dst, instr.value);
+    auto format(const DecodedOp &decodedOp, auto &ctx) const {
+        const string opcodeString = getOpcodeString(decodedOp.opcode);
+        if (auto instr = get_if<WriteDecodedOp>(&decodedOp.instr)) {
+            return format_to(ctx.out(), "PC:{:X}  {}: ${}={:X}", decodedOp.pc,
+                             opcodeString, instr->dstRegId, instr->value);
+        } else if (auto instr = get_if<LoadDecodedOp>(&decodedOp.instr)) {
+            return format_to(ctx.out(), "PC:{:X}  {}: ${}=[{:X}]={:X}",
+                             decodedOp.pc, opcodeString, instr->dstRegId,
+                             instr->addr, instr->value);
+        } else if (auto instr = get_if<StoreDecodedOp>(&decodedOp.instr)) {
+            return format_to(ctx.out(), "PC:{:X}  {}: [{:X}]={:X}", decodedOp.pc,
+                             opcodeString, instr->dstAddr, instr->value);
+        } else if (auto instr = get_if<BranchDecodedOp>(&decodedOp.instr)) {
+            return format_to(ctx.out(), "PC:{:X} {}: $PC={:X}", decodedOp.pc,
+                             opcodeString, instr->pc);
+        } else {
+            assert(false);
         }
     }
 };
@@ -805,7 +834,8 @@ struct Cpu {
     MMap *mmap;
 
     Cpu()
-        : ZERO_INSTR{State::NoLoadDelay, Type::Write, 0, 0, SecondaryOps::ADD},
+        : ZERO_INSTR{State::NoLoadDelay, RESET_VECTOR, WriteDecodedOp{0, 0},
+                     SecondaryOps::ADD},
           mmap{new MMap{}} {
         reg.pc = RESET_VECTOR;
     }
@@ -813,35 +843,38 @@ struct Cpu {
 
     // This is where all side effects should be.
     void runCpuLoop() {
-        DecodedOp prevInstr{ZERO_INSTR};
+        DecodedOp prevDecoded{ZERO_INSTR};
 
         while (true) {
             try {
                 u32 opcode = mmap->load32(reg.pc);
-                DecodedOp decodedOp = decode(opcode, prevInstr);
-                if (decodedOp.type == Type::Write)
-                    assert(decodedOp.dst < reg.gpr.size());
+                DecodedOp decodedOp = decode(opcode, prevDecoded);
                 println("{}", decodedOp);
 
                 // TODO: unless an IRQ occurs between the load and
                 // next opcode, in that case the load would complete during IRQ
                 // handling, and so, the next opcode would receive the NEW value
-                if (decodedOp.newState == State::NoLoadDelay &&
-                    decodedOp.type == Type::Write) {
-                    reg.gpr[decodedOp.dst] = decodedOp.value;
+                if (auto instr = get_if<LoadDecodedOp>(&decodedOp.instr)) {
+                    assert(instr->dstRegId < reg.gpr.size());
+                } else if (auto instr =
+                               get_if<WriteDecodedOp>(&decodedOp.instr)) {
+                    assert(instr->dstRegId < reg.gpr.size());
+                    reg.gpr[instr->dstRegId] = instr->value;
 
-                    if (prevInstr.dst == decodedOp.dst) {
-                        prevInstr.newState = State::OverWritten;
+                    if (auto prevInstr =
+                            get_if<LoadDecodedOp>(&prevDecoded.instr);
+                        prevInstr && prevInstr->dstRegId == instr->dstRegId) {
+                        prevDecoded.newState = State::OverWritten;
                     }
                 }
 
-                if (prevInstr.newState == State::LoadDelay ||
-                    prevInstr.newState == State::SpecialLoadDelay) {
-                    reg.gpr[prevInstr.dst] = prevInstr.value;
+                if (auto prevInstr =
+                        get_if<LoadDecodedOp>(&prevDecoded.instr)) {
+                    reg.gpr[prevInstr->dstRegId] = prevInstr->value;
                 }
 
                 reg.pc += 4;
-                prevInstr = decodedOp;
+                prevDecoded = decodedOp;
                 reg.gpr[0] = 0;
             } catch (const MipsException &e) {
                 cop0.epc = e.EPC;
@@ -899,58 +932,83 @@ struct Cpu {
         using enum PrimaryOps;
         switch (static_cast<PrimaryOps>(primaryOp)) {
             case ADDIU:
-                return {State::NoLoadDelay, Type::Write, rt,
-                        addiu(reg.gpr[rs], imm16), ADDIU};
+                return {State::NoLoadDelay, reg.pc,
+                        WriteDecodedOp{rt, addiu(reg.gpr[rs], imm16)}, ADDIU};
             case ADDI:
-                return {State::NoLoadDelay, Type::Write, rt,
-                        static_cast<u32>(addi(reg.gpr[rs], imm16)), ADDI};
-            case LB:
-                return {State::LoadDelay, Type::Write, rt,
-                        lb(reg.gpr[rs], imm16), LB};
-            case LH:
-                return {State::LoadDelay, Type::Write, rt,
-                        lh(reg.gpr[rs], imm16), LH};
+                return {State::NoLoadDelay, reg.pc,
+                        WriteDecodedOp{
+                            rt, static_cast<u32>(addi(reg.gpr[rs], imm16))},
+                        ADDI};
+            case LB: {
+                auto [value, addr] = lb(reg.gpr[rs], imm16);
+                return {State::LoadDelay, reg.pc,
+                        LoadDecodedOp{rt, value, addr}, LB};
+            }
+            case LH: {
+                auto [value, addr] = lh(reg.gpr[rs], imm16);
+                return {State::LoadDelay, reg.pc,
+                        LoadDecodedOp{rt, value, addr}, LH};
+            }
             case LWL:
-                if (prevInstr.newState == State::SpecialLoadDelay &&
-                    prevInstr.dst == rt) {
-                    return {State::SpecialLoadDelay, Type::Write, rt,
-                            lwl(prevInstr.value, reg.gpr[rs], imm16), LWL};
+                if (auto instr = get_if<LoadDecodedOp>(&prevInstr.instr);
+                    prevInstr.newState == State::SpecialLoadDelay &&
+                    instr->dstRegId == rt) {
+                    auto [value, addr] = lwl(instr->value, reg.gpr[rs], imm16);
+                    return {State::SpecialLoadDelay, reg.pc,
+                            LoadDecodedOp{rt, value, addr}, LWL};
                 } else {
-                    return {State::SpecialLoadDelay, Type::Write, rt,
-                            lwl(reg.gpr[rt], reg.gpr[rs], imm16), LWL};
+                    auto [value, addr] = lwl(reg.gpr[rt], reg.gpr[rs], imm16);
+                    return {State::SpecialLoadDelay, reg.pc,
+                            LoadDecodedOp{rt, value, addr}, LWL};
                 }
-            case LW:
-                return {State::LoadDelay, Type::Write, rt,
-                        lw(reg.gpr[rs], imm16), LW};
-            case LBU:
-                return {State::LoadDelay, Type::Write, rt,
-                        lbu(reg.gpr[rs], imm16), LBU};
-            case LHU:
-                return {State::LoadDelay, Type::Write, rt,
-                        lhu(reg.gpr[rs], imm16), LHU};
+            case LW: {
+                auto [value, addr] = lw(reg.gpr[rs], imm16);
+                return {State::LoadDelay, reg.pc,
+                        LoadDecodedOp{rt, value, addr}, LW};
+            }
+            case LBU: {
+                auto [value, addr] = lbu(reg.gpr[rs], imm16);
+                return {State::LoadDelay, reg.pc,
+                        LoadDecodedOp{rt, value, addr}, LBU};
+            }
+            case LHU: {
+                auto [value, addr] = lhu(reg.gpr[rs], imm16);
+                return {State::LoadDelay, reg.pc,
+                        LoadDecodedOp{rt, value, addr}, LHU};
+            }
             case LWR:
-                if (prevInstr.newState == State::SpecialLoadDelay &&
-                    prevInstr.dst == rt) {
-                    return {State::SpecialLoadDelay, Type::Write, rt,
-                            lwr(prevInstr.value, reg.gpr[rs], imm16), LWR};
+                if (auto instr = get_if<LoadDecodedOp>(&prevInstr.instr);
+                    prevInstr.newState == State::SpecialLoadDelay &&
+                    instr->dstRegId == rt) {
+                    auto [value, addr] = lwr(instr->value, reg.gpr[rs], imm16);
+                    return {State::SpecialLoadDelay, reg.pc,
+                            LoadDecodedOp{rt, value, addr}, LWR};
                 } else {
-                    return {State::SpecialLoadDelay, Type::Write, rt,
-                            lwr(reg.gpr[rt], reg.gpr[rs], imm16), LWR};
+                    auto [value, addr] = lwr(reg.gpr[rt], reg.gpr[rs], imm16);
+                    return {State::SpecialLoadDelay, reg.pc,
+                            LoadDecodedOp{rt, value, addr}, LWR};
                 }
             case SW:
-                return {State::NoLoadDelay, Type::Store,
-                        sw(reg.gpr[rt], reg.gpr[rs], imm16), reg.gpr[rt], SW};
+                return {State::NoLoadDelay, reg.pc,
+                        StoreDecodedOp{reg.gpr[rt],
+                                       sw(reg.gpr[rt], reg.gpr[rs], imm16)},
+                        SW};
             case SH:
-                return {State::NoLoadDelay, Type::Store,
-                        sh(reg.gpr[rt], reg.gpr[rs], imm16), reg.gpr[rt], SH};
+                return {State::NoLoadDelay, reg.pc,
+                        StoreDecodedOp{reg.gpr[rt],
+                                       sh(reg.gpr[rt], reg.gpr[rs], imm16)},
+                        SH};
             case SB:
-                return {State::NoLoadDelay, Type::Store,
-                        sb(reg.gpr[rt], reg.gpr[rs], imm16), reg.gpr[rt], SB};
+                return {State::NoLoadDelay, reg.pc,
+                        StoreDecodedOp{reg.gpr[rt],
+                                       sb(reg.gpr[rt], reg.gpr[rs], imm16)},
+                        SB};
             case LUI:
-                return {State::NoLoadDelay, Type::Write, rt, lui(imm16), LUI};
+                return {State::NoLoadDelay, reg.pc,
+                        WriteDecodedOp{rt, lui(imm16)}, LUI};
             case ORI:
-                return {State::NoLoadDelay, Type::Write, rt,
-                        ori(reg.gpr[rs], imm16), ORI};
+                return {State::NoLoadDelay, reg.pc,
+                        WriteDecodedOp{rt, ori(reg.gpr[rs], imm16)}, ORI};
             default:
                 throw runtime_error{format(
                     "Invalid opcode/Not implemented Yet: {:032b}, "
@@ -973,20 +1031,26 @@ struct Cpu {
         using enum SecondaryOps;
         switch (static_cast<SecondaryOps>(secondaryOp)) {
             case ADD:
-                return {State::NoLoadDelay, Type::Write, rd,
-                        static_cast<u32>(add(reg.gpr[rs], reg.gpr[rt])), ADD};
+                return {State::NoLoadDelay, reg.pc,
+                        WriteDecodedOp{rd, static_cast<u32>(
+                                               add(reg.gpr[rs], reg.gpr[rt]))},
+                        ADD};
             case ADDU:
-                return {State::NoLoadDelay, Type::Write, rd,
-                        addu(reg.gpr[rs], reg.gpr[rt]), ADDU};
+                return {State::NoLoadDelay, reg.pc,
+                        WriteDecodedOp{rd, addu(reg.gpr[rs], reg.gpr[rt])},
+                        ADDU};
             case SUB:
-                return {State::NoLoadDelay, Type::Write, rd,
-                        static_cast<u32>(sub(reg.gpr[rs], reg.gpr[rt])), SUB};
+                return {State::NoLoadDelay, reg.pc,
+                        WriteDecodedOp{rd, static_cast<u32>(
+                                               sub(reg.gpr[rs], reg.gpr[rt]))},
+                        SUB};
             case SUBU:
-                return {State::NoLoadDelay, Type::Write, rd,
-                        subu(reg.gpr[rs], reg.gpr[rt]), SUBU};
+                return {State::NoLoadDelay, reg.pc,
+                        WriteDecodedOp{rd, subu(reg.gpr[rs], reg.gpr[rt])},
+                        SUBU};
             case SLL:
-                return {State::NoLoadDelay, Type::Write, rd,
-                        sll(reg.gpr[rt], imm5), SLL};
+                return {State::NoLoadDelay, reg.pc,
+                        WriteDecodedOp{rd, sll(reg.gpr[rt], imm5)}, SLL};
             default:
                 throw runtime_error{format(
                     "Invalid opcode/Not implemented Yet: {:032b}, "
@@ -1027,52 +1091,56 @@ struct Cpu {
 
     // Reads the most significant bytes of the source into the least
     // significant bytes of the destination.
-    u32 lwr(const u32 dest, const u32 base, const s16 offset) {
+    tuple<u32, u32> lwr(const u32 dest, const u32 base, const s16 offset) {
         const u32 addr = base + offset;
         const u32 wordAddr = (addr / 4) * 4;
         const u32 src = mmap->load32(wordAddr);
         const u32 bitLength = (addr - wordAddr + 1) * 8;
-        return replaceBitRange(dest, 0, src,
-                               static_cast<u32>(bitSize<u32>() - bitLength),
-                               bitLength);
+        return {replaceBitRange(dest, 0, src,
+                                static_cast<u32>(bitSize<u32>() - bitLength),
+                                bitLength),
+                addr};
     }
 
     // Reads the least significant bytes of the source into the most significant
     // bytes of the destination.
-    u32 lwl(const u32 dest, const u32 base, const s16 offset) {
+    tuple<u32, u32> lwl(const u32 dest, const u32 base, const s16 offset) {
         const u32 addr = base + offset;
         const u32 wordAddr = (addr / 4) * 4;
         const u32 src = mmap->load32(wordAddr);
         const u32 bitLength = (addr - wordAddr + 1) * 8;
-        return replaceBitRange(dest,
-                               static_cast<u32>(bitSize<u32>() - bitLength),
-                               src, 0, bitLength);
+        return {
+            replaceBitRange(dest, static_cast<u32>(bitSize<u32>() - bitLength),
+                            src, 0, bitLength),
+            addr};
     }
 
-    u32 lb(const u32 s, const s16 imm16) {
+    tuple<u32, u32> lb(const u32 s, const s16 imm16) {
         // implicit sign-extension, this does not work in 1's complement.
-        return static_cast<s8>(mmap->load8(s + imm16));
+        return {static_cast<s8>(mmap->load8(s + imm16)), s + imm16};
     }
 
-    u32 lbu(const u32 s, const s16 imm16) { return mmap->load8(s + imm16); }
+    tuple<u32, u32> lbu(const u32 s, const s16 imm16) {
+        return {mmap->load8(s + imm16), s + imm16};
+    }
 
     // implicit sign-extension, this does not work in 1's complement.
-    u32 lh(const u32 s, const s16 imm16) {
+    tuple<u32, u32> lh(const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
         if (addr % 2 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
-        return static_cast<s16>(mmap->load16(s + imm16));
+        return {static_cast<s16>(mmap->load16(s + imm16)), addr};
     }
 
-    u32 lhu(const u32 s, const s16 imm16) {
+    tuple<u32, u32> lhu(const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
         if (addr % 2 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
-        return mmap->load16(addr);
+        return {mmap->load16(addr), addr};
     }
 
-    u32 lw(const u32 s, const s16 imm16) {
+    tuple<u32, u32> lw(const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
         if (addr % 4 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
-        return mmap->load32(s + imm16);
+        return {mmap->load32(s + imm16), addr};
     }
 
     s32 addi(const s32 s, const s16 imm16) {
