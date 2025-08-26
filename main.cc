@@ -152,7 +152,7 @@ struct MipsException {
 };
 
 struct Registers {
-    array<u32, 32> gpr{};
+    array<u32, 32> gpr{0};
     u32 pc = 0;
     u32 hi = 0;
     u32 lo = 0;
@@ -815,8 +815,9 @@ struct formatter<DecodedOp> {
                              decodedOp.pc, opcodeString, instr->dstRegId,
                              instr->addr, instr->value);
         } else if (auto instr = get_if<StoreDecodedOp>(&decodedOp.instr)) {
-            return format_to(ctx.out(), "PC:{:X}  {}: [{:X}]={:X}", decodedOp.pc,
-                             opcodeString, instr->dstAddr, instr->value);
+            return format_to(ctx.out(), "PC:{:X}  {}: [{:X}]={:X}",
+                             decodedOp.pc, opcodeString, instr->dstAddr,
+                             instr->value);
         } else if (auto instr = get_if<BranchDecodedOp>(&decodedOp.instr)) {
             return format_to(ctx.out(), "PC:{:X} {}: $PC={:X}", decodedOp.pc,
                              opcodeString, instr->pc);
@@ -868,12 +869,17 @@ struct Cpu {
                     }
                 }
 
+
+                reg.pc += 4;
+
                 if (auto prevInstr =
                         get_if<LoadDecodedOp>(&prevDecoded.instr)) {
                     reg.gpr[prevInstr->dstRegId] = prevInstr->value;
+                } else if (auto prevInstr =
+                               get_if<BranchDecodedOp>(&prevDecoded.instr)) {
+                    reg.pc = prevInstr->pc;
                 }
 
-                reg.pc += 4;
                 prevDecoded = decodedOp;
                 reg.gpr[0] = 0;
             } catch (const MipsException &e) {
@@ -1009,6 +1015,9 @@ struct Cpu {
             case ORI:
                 return {State::NoLoadDelay, reg.pc,
                         WriteDecodedOp{rt, ori(reg.gpr[rs], imm16)}, ORI};
+            case J:
+                return {State::NoLoadDelay, reg.pc,
+                        BranchDecodedOp{j(reg.pc, imm26)}, J};
             default:
                 throw runtime_error{format(
                     "Invalid opcode/Not implemented Yet: {:032b}, "
@@ -1059,6 +1068,11 @@ struct Cpu {
                     opcode, secondaryOp,
                     getSecondaryOps(static_cast<SecondaryOps>(secondaryOp)))};
         };
+    }
+
+    u32 j(const u32 currPC, const u32 imm26) {
+        assert(imm26 <= (1 << 26) - 1);
+        return ((currPC + 4) & 0xF0000000) + (imm26 << 2);
     }
 
     u32 sw(const u32 value, const u32 s, const s16 imm16) {
