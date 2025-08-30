@@ -11,6 +11,7 @@
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <print>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -45,6 +46,33 @@ template <unsigned_integral T, unsigned_integral U>
 constexpr T uintNoTruncCast(const U x) noexcept {
     assert(numLimit<T>() >= x);
     return static_cast<T>(x);
+}
+
+// shifts the extractedBits to least significant end.
+u32 extractBits(u32 bits, u32 start, u32 length) {
+    constexpr u32 end = sizeof(bits) * 8 - 1;
+    assert(end >= start && start + length - 1 <= end);
+
+    u32 shifted = bits >> start;
+    u32 mask = static_cast<u64>(1 << length) - 1;
+
+    assert((shifted & mask) <= static_cast<u64>(1 << length) - 1);
+    return shifted & mask;
+}
+
+// replaces the bits in dst with the bits in src acorrding to the bitRange.
+u32 replaceBitRange(const u32 dst, const u32 dstStart, const u32 src,
+                    const u32 srcStart, const u32 length) {
+    static_assert(sizeof(dst) == sizeof(src));
+    assert(bitSize<u32>() >= length + dstStart);
+    assert(bitSize<u32>() >= length + srcStart);
+    const u32 lengthOfOnes = (1 << length) - 1;
+    const u32 dstMask = ~(lengthOfOnes << dstStart);
+    const u32 srcMask = lengthOfOnes << srcStart;
+    const s32 distance = dstStart - srcStart;
+
+    return distance <= 0 ? (dst & dstMask) | ((src & srcMask) >> -distance)
+                         : (dst & dstMask) | ((src & srcMask) << distance);
 }
 
 // checkout table 3.2:
@@ -178,107 +206,65 @@ struct Range {
     }
 };
 
-// Source: https://psx-spx.consoledev.net/iomap/
-struct MemCtrl1 {
-    array<u32, 9> reg;
+struct MemCtrl1DelayReg {
+    u8 writeDelay;
+    u8 readDelay;
+    u8 recoveryPeriod;
+    u8 holdPeriod;
+    u8 floatingPeriod;
+    u8 PreStrobePeriod;
+    u8 dataBusWidth;
+    u8 autoIncrement;
+    u8 numberOfAddressBits;
+    u8 DMATimingOverride;
+    u8 addressErrorFlag;
+    u8 DMATimingSelect;
+    u8 wideDma;
+    u8 wait;
+    u32 value;
 
-    MemCtrl1() : reg{0} {}
+    MemCtrl1DelayReg(u32 value)
+        : writeDelay{static_cast<u8>(extractBits(value, 0, 4))},
+          readDelay{static_cast<u8>(extractBits(value, 4, 4))},
+          recoveryPeriod{static_cast<u8>(extractBits(value, 8, 1))},
+          holdPeriod{static_cast<u8>(extractBits(value, 9, 1))},
+          floatingPeriod{static_cast<u8>(extractBits(value, 10, 1))},
+          PreStrobePeriod{static_cast<u8>(extractBits(value, 11, 1))},
+          dataBusWidth{static_cast<u8>(extractBits(value, 12, 1))},
+          autoIncrement{static_cast<u8>(extractBits(value, 13, 1))},
+          numberOfAddressBits{static_cast<u8>(extractBits(value, 16, 5))},
+          DMATimingOverride{static_cast<u8>(extractBits(value, 24, 4))},
+          addressErrorFlag{static_cast<u8>(extractBits(value, 28, 1))},
+          DMATimingSelect{static_cast<u8>(extractBits(value, 29, 1))},
+          wideDma{static_cast<u8>(extractBits(value, 30, 1))},
+          wait{static_cast<u8>(extractBits(value, 31, 1))},
+          value{value} {}
 
-    enum class Register {
-        E1_BASE_ADDR,
-        E2_BASE_ADDR,
-        E1_DELAY,
-        E3_DELAY,
-        BIOS_DELAY,
-        SPU_DELAY,
-        CDROM_DELAY,
-        E2_DELAY,
-        COM_DELAY,
-    };
-
-    u32 getRegister(const u32 offset) {
-        const u32 idx = offset % 4;
-        assert(idx < reg.size());
-        return reg[idx];
-    }
-
-    void writeRegister(const u32 offset, const u32 value) {
-        const u32 idx = offset / 4;
-        assert(idx < reg.size());
-        using enum Register;
-        switch (static_cast<Register>(idx)) {
-            case E1_BASE_ADDR:
-                writeE1BaseAddr(value);
-                break;
-            case E2_BASE_ADDR:
-                writeE2BaseAddr(value);
-            case E1_DELAY:
-                writeE1Delay(value);
-                break;
-            case E3_DELAY:
-                writeE3Delay(value);
-                break;
-            case BIOS_DELAY:
-                writeBIOSDelay(value);
-                break;
-            case SPU_DELAY:
-                writeSPUDelay(value);
-                break;
-            case CDROM_DELAY:
-                writeCDROMDelay(value);
-                break;
-            case E2_DELAY:
-                writeE2Delay(value);
-                break;
-            case COM_DELAY:
-                writeCOMDelay(value);
-                break;
-        }
-    }
-
-    void writeE1BaseAddr(const u32 value) {
-        // TODO: No support for expanding expansion, and changing the base
-        // address.
-        assert(false);
-    }
-
-    void writeE2BaseAddr(const u32 value) { assert(false); }
-
-    void writeE1Delay(const u32 value) { assert(false); }
-
-    void writeE3Delay(const u32 value) { assert(false); }
-
-    void writeBIOSDelay(const u32 value) {
-        const u8 idx{static_cast<u8>(Register::BIOS_DELAY)};
-        reg[idx] = value;
-    }
-
-    void writeSPUDelay(const u32 value) { assert(false); }
-
-    void writeCDROMDelay(const u32 value) { assert(false); }
-
-    void writeE2Delay(const u32 value) { assert(false); }
-
-    void writeCOMDelay(const u32 value) { assert(false); }
+    MemCtrl1DelayReg() {}
 };
 
-struct MemCtrl2 {
-    u32 ramSize;
-    MemCtrl2() : ramSize{0} {}
+template <typename T>
+struct AddressedValue {
+    Range range;
+    T value;
+    AddressedValue(Range &&range) : range{range} {}
 };
 
-// TODO: Add operator overloads for V/PAddress to make everything use
-// V/PAddress.
-// TODO: Find a better way to address stuff, so that you can get an address
-// modified specifc to any Range. Need to do this for ram mirroring.
+struct VAddress {
+    u32 m_addr;
+};
+struct PAddress {
+    u32 m_addr;
+};
+
+// TODO: Change the code so that the order of an enum never matters.
+// TODO: Change the code so that if ranges get changed by bios, the addresses are some sort of not_initliazed value.
 class MMap {
     // User Memory: KUSEG is intended to contain 2GB virtual memory (on extended
     // MIPS processors), the PSX doesn't support virtual memory, and KUSEG
     // simply contains a mirror of KSEG0/KSEG1 (in the first 512MB) (trying to
     // access memory in the remaining 1.5GB causes an exception).
     // source: https://psx-spx.consoledev.net/memorymap/#write-queue
-    //
-    //
     static constexpr Range KUSEG_RANGE{0x00000000, 512 * MB};
     static constexpr Range KSEG0_RANGE{0x80000000, 512 * MB};
     static constexpr Range KSEG1_RANGE{0xA0000000, 512 * MB};
@@ -288,8 +274,7 @@ class MMap {
     Range RAM_RANGE{0x00000000, 2 * MB, 2 * MB - 1};
     array<u8, 2 * MB> ramBuffer;
 
-    // TODO: No support for expanding expansion, and changing the base address.
-    static constexpr Range E1_RANGE{0x1F000000, 512 * KB};
+    Range E1_RANGE{0x1F000000, 512 * KB};
     array<u8, 512 * KB> e1Buffer;
 
     static constexpr Range SCRATCHPAD_RANGE{0x1F800000, KB};
@@ -297,26 +282,28 @@ class MMap {
 
     static constexpr Range IO_RANGE{0x1F801000, 4 * KB};
     static constexpr Range MEM_CTRL1_RANGE{0x1F801000, 36};
-    MemCtrl1 memCtrl1;
-    static constexpr Range MEM_CTRL2_RANGE{0x1F801060, 4};
-    MemCtrl2 memCtrl2;
+    Range SPU_RANGE{0x1F801D80, 0};
+    Range CDROM_RANGE{0x1F801800, 0};
+
+    AddressedValue<array<MemCtrl1DelayReg, 6>> memCtrl1DelayRegs{
+        Range{0x1F801008, 6 * 4}};
+
+    AddressedValue<u32> e1BaseAddr{Range{0x1F801000, 1}};
+    AddressedValue<u32> e2BaseAddr{Range{0x1F801004, 1}};
+
+    AddressedValue<u32> ramSize{{0x1F801060, 4}};
 
     // TODO: change since, not actually buffer.
     Range E2_RANGE{0x1F802000, 8 * KB};
     array<u8, 8 * KB> e2Buffer;
 
-    static constexpr Range E3_RANGE{0x1FA00000, 2 * MB};
-    array<u8, 2 * MB> e3Buffer;
+    // not used by psx.
+    Range E3_RANGE{0x1FA00000, 2 * MB};
+    array<u8, 0> e3Buffer;
 
-    Range BIOS_RANGE{0x1FC00000, 512 * KB};
-    array<u8, 512 * KB> biosBuffer;
-
-    struct VAddress {
-        u32 m_addr;
-    };
-    struct PAddress {
-        u32 m_addr;
-    };
+    AddressedValue<array<u8, 512 * KB>> biosBuffer{{0x1FC00000, 512 * KB}};
+    AddressedValue<u32> cacheCtrlReg{Range{0xFFFE0130, 4}};
+    AddressedValue<u32> comDelay{Range{0x1F801020, 4}};
 
     enum class BufferType {
         Ram,
@@ -326,6 +313,17 @@ class MMap {
         E2,
         E3,
         Bios,
+        CacheCtrl,
+    };
+
+    // TODO: make it so that this is somehow with resepct to the addresses.
+    enum class DelayIdx {
+        E1_DELAY,
+        E3_DELAY,
+        BIOS_DELAY,
+        SPU_DELAY,
+        CDROM_DELAY,
+        E2_DELAY
     };
 
     span<const u8> getReadBuffer(BufferType type) {
@@ -342,18 +340,99 @@ class MMap {
             case E3:
                 return e3Buffer;
             case Bios:
-                return biosBuffer;
+                return biosBuffer.value;
             case Io:
                 assert(false);
+            case CacheCtrl:
+                assert(false);
         }
+    }
+
+    u32 getMemCtrl1Reg(const PAddress pAddr) {
+        const u32 addr = pAddr.m_addr;
+
+        if (e1BaseAddr.range.contains(addr)) {
+            return e1BaseAddr.value;
+        } else if (e2BaseAddr.range.contains(addr)) {
+            return e2BaseAddr.value;
+        }
+
+        assert(memCtrl1DelayRegs.range.contains(addr));
+        const u32 idx = memCtrl1DelayRegs.range.getOffset(addr) / 4;
+        assert(idx < memCtrl1DelayRegs.value.size());
+        return memCtrl1DelayRegs.value[idx].value;
     }
 
     u32 getIoReg(const PAddress pAddr) {
         const u32 addr = pAddr.m_addr;
         if (MEM_CTRL1_RANGE.contains(addr)) {
-            return memCtrl1.getRegister(MEM_CTRL1_RANGE.getOffset(addr));
-        } else if (MEM_CTRL2_RANGE.contains(addr)) {
-            return memCtrl2.ramSize;
+            return getMemCtrl1Reg(pAddr);
+        } else if (ramSize.range.contains(addr)) {
+            return ramSize.value;
+        } else {
+            assert(false);
+        }
+    }
+
+    // should try to minimize side effects like these.
+    void updateDelayRegState(const DelayIdx idx) {
+        array<Range *, 6> dict = {&E1_RANGE,  &E3_RANGE,    &biosBuffer.range,
+                                  &SPU_RANGE, &CDROM_RANGE, &E2_RANGE};
+
+        assert(static_cast<u32>(idx) < dict.size());
+        // assert(static_cast<u32>(idx) != 1);
+        // assert(static_cast<u32>(idx) != 3);
+        // assert(static_cast<u32>(idx) != 4);
+        // assert(static_cast<u32>(idx) != 5);
+
+        dict[static_cast<u32>(idx)]->byteLength =
+            (1 << memCtrl1DelayRegs.value[static_cast<u32>(idx)]
+                      .numberOfAddressBits);
+        const u32 byteLength = dict[static_cast<u32>(idx)]->byteLength;
+
+        using enum DelayIdx;
+        switch (idx) {
+            case E1_DELAY:
+                println("E1_DELAY, Length:{}", byteLength);
+                break;
+            case E3_DELAY:
+                println("E3_DELAY, Length:{}", byteLength);
+                break;
+            case BIOS_DELAY:
+                println("BIOS_DELAY, Length:{}", byteLength);
+                break;
+            case SPU_DELAY:
+                println("SPU_DELAY, Length:{}", byteLength);
+                break;
+            case CDROM_DELAY:
+                println("CDROM_DELAY, Length:{}", byteLength);
+                break;
+            case E2_DELAY:
+                println("E2_DELAY, Length:{}", byteLength);
+                break;
+        }
+    }
+
+    void writeMemCtrl1Register(const PAddress pAddr, const u32 value) {
+        const u32 addr = pAddr.m_addr;
+        if (e1BaseAddr.range.contains(addr)) {
+            assert(extractBits(value, 24, 8) == 0x1F);
+            assert(value == 0x1F000000);
+            println("e1BaseAddr");
+            e1BaseAddr.range.start = value;
+        } else if (e2BaseAddr.range.contains(addr)) {
+            assert(extractBits(value, 24, 8) == 0x1F);
+            assert(value == 0x1F802000);
+            println("e2BaseAddr");
+            e2BaseAddr.range.start = value;
+        } else if (memCtrl1DelayRegs.range.contains(pAddr.m_addr)) {
+            const u32 idx = memCtrl1DelayRegs.range.getOffset(pAddr.m_addr) / 4;
+            assert(idx < memCtrl1DelayRegs.value.size());
+            memCtrl1DelayRegs.value[idx] = value;
+            updateDelayRegState(static_cast<DelayIdx>(idx));
+        } else if (comDelay.range.contains(addr)) {
+            println("comDelay");
+            comDelay.value = value;
         } else {
             assert(false);
         }
@@ -362,13 +441,14 @@ class MMap {
     void writeIoReg(const PAddress pAddr, const u32 value) {
         const u32 addr = pAddr.m_addr;
         if (MEM_CTRL1_RANGE.contains(addr)) {
-            memCtrl1.writeRegister(MEM_CTRL1_RANGE.getOffset(addr), value);
-        } else if (MEM_CTRL2_RANGE.contains(addr)) {
+            writeMemCtrl1Register(pAddr, value);
+        } else if (ramSize.range.contains(addr)) {
+            println("ramSize");
             const bitset<32> bits = value;
             const u8 ramRangeChoice = (bits[11] << 1) | bits[9];
             const array<u8, 4> ramSizes{1, 4, 2, 8};
             RAM_RANGE.byteLength = ramSizes[ramRangeChoice];
-            memCtrl2.ramSize = value;
+            ramSize.value = value;
         } else {
             assert(false);
         }
@@ -390,6 +470,8 @@ class MMap {
             case Io:
                 assert(false);
             case Bios:
+                assert(false);
+            case CacheCtrl:
                 assert(false);
         }
     }
@@ -420,10 +502,13 @@ class MMap {
             println("E3_RANGE");
             assert(false);
             return E3;
-        } else if (BIOS_RANGE.contains(addr)) {
+        } else if (biosBuffer.range.contains(addr)) {
             return Bios;
+        } else if (cacheCtrlReg.range.contains(addr)) {
+            assert(false);
+            return CacheCtrl;
         } else {
-            println("{:X}", addr);
+            println("{}", addr);
             assert(false);
         }
     }
@@ -445,13 +530,15 @@ class MMap {
             case E3:
                 return E3_RANGE.getOffset(addr);
             case Bios:
-                return BIOS_RANGE.getOffset(addr);
+                return biosBuffer.range.getOffset(addr);
+            default:
+                assert(false);
         }
     }
 
     // TODO: need to implement this behaviour, KSEG1 addresses can't access
     // scratchpad.
-    PAddress paddr(const VAddress vAddr) {
+    PAddress getPAddr(const VAddress vAddr) {
         const u32 addr = vAddr.m_addr;
         const bool condition = KSEG1_RANGE.contains(addr) ||
                                KSEG0_RANGE.contains(addr) ||
@@ -468,20 +555,58 @@ class MMap {
             assert(false);
     }
 
+    u32 handleRead(const VAddress vAddr, const u8 numOfBytes) {
+        assert(numOfBytes <= 4);
+        const u32 addr = getPAddr(vAddr).m_addr;
+        if (RAM_RANGE.contains(addr)) {
+            println("RAM");
+            assert(false);
+        } else if (E1_RANGE.contains(addr)) {
+            println("E1");
+            assert(false);
+        } else if (SCRATCHPAD_RANGE.contains(addr)) {
+            println("SCRATCHPAD_RANGE");
+            assert(false);
+        } else if (IO_RANGE.contains(addr)) {
+            println("IO_RANGE");
+            return getIoReg(PAddress{addr});
+        } else if (E2_RANGE.contains(addr)) {
+            println("E2_RANGE");
+            assert(false);
+        } else if (E3_RANGE.contains(addr)) {
+            println("E3_RANGE");
+            assert(false);
+        } else if (biosBuffer.range.contains(addr)) {
+            const u32 offset = biosBuffer.range.getOffset(addr);
+            assert(biosBuffer.value.size() >= offset + numOfBytes);
+            u32 accBytes{0};
+            for (int i = 0; i < numOfBytes; ++i) {
+                accBytes |=
+                    static_cast<u32>(biosBuffer.value[offset + i] << (8 * i));
+            }
+            return accBytes;
+        } else if (cacheCtrlReg.range.contains(addr)) {
+            return cacheCtrlReg.value;
+        } else {
+            println("{}", addr);
+            assert(false);
+        }
+    }
+
    public:
     MMap() {
         struct stat info;
         stat("SCPH1001.BIN", &info);
-        if (biosBuffer.size() != info.st_size)
+        if (biosBuffer.value.size() != info.st_size)
             throw runtime_error{"size of BIOS is not 512KB"};
 
         ifstream bios{"SCPH1001.BIN", ios::binary | ios::in};
-        bios.read((char *)biosBuffer.data(), biosBuffer.size());
+        bios.read((char *)biosBuffer.value.data(), biosBuffer.value.size());
     }
 
-    u32 load32(u32 addr) {
-        VAddress vAddr{addr};
-        const PAddress pAddr = paddr(vAddr);
+    // need to refactor the way shits read/stored;
+    u32 load32(VAddress vAddr) {
+        const PAddress pAddr = getPAddr(vAddr);
         BufferType type = getType(pAddr);
 
         span<const u8> buffer = getReadBuffer(type);
@@ -495,9 +620,8 @@ class MMap {
         return byte0 | byte1 | byte2 | byte3;
     }
 
-    u16 load16(u32 addr) {
-        VAddress vAddr{addr};
-        const PAddress pAddr = paddr(vAddr);
+    u16 load16(VAddress vAddr) {
+        const PAddress pAddr = getPAddr(vAddr);
         BufferType type = getType(pAddr);
         span<const u8> buffer = getReadBuffer(type);
         const u32 offset = getOffset(type, pAddr);
@@ -508,9 +632,8 @@ class MMap {
         return byte0 | byte1;
     }
 
-    u8 load8(u32 addr) {
-        VAddress vAddr{addr};
-        const PAddress pAddr = paddr(vAddr);
+    u8 load8(VAddress vAddr) {
+        const PAddress pAddr = getPAddr(vAddr);
         BufferType type = getType(pAddr);
         span<const u8> buffer = getReadBuffer(type);
         const u32 offset = getOffset(type, pAddr);
@@ -527,9 +650,8 @@ class MMap {
     // this, as it uses sh to write to certain DMA registers. If this is not
     // properly emulated, the soundscope will hang, waiting for an interrupt
     // that will never be fired.
-    void store32(const u32 addr, const u32 value) {
-        const VAddress vAddr{addr};
-        const PAddress pAddr = paddr(vAddr);
+    void store32(const VAddress vAddr, const u32 value) {
+        const PAddress pAddr = getPAddr(vAddr);
         const BufferType type = getType(pAddr);
 
         if (type == BufferType::Io) {
@@ -547,9 +669,8 @@ class MMap {
         buffer[3] = value & 0xFF'00'00'00;
     }
 
-    void store16(const u32 addr, const u32 value) {
-        const VAddress vAddr{addr};
-        const PAddress pAddr = paddr(vAddr);
+    void store16(const VAddress vAddr, const u32 value) {
+        const PAddress pAddr = getPAddr(vAddr);
         const BufferType type = getType(pAddr);
 
         if (type == BufferType::Io) {
@@ -566,9 +687,8 @@ class MMap {
         buffer[1] = value & 0x00'00'FF'00;
     }
 
-    void store8(const u32 addr, const u32 value) {
-        const VAddress vAddr{addr};
-        const PAddress pAddr = paddr(vAddr);
+    void store8(const VAddress vAddr, const u32 value) {
+        const PAddress pAddr = getPAddr(vAddr);
         const BufferType type = getType(pAddr);
 
         if (type == BufferType::Io) {
@@ -848,7 +968,7 @@ struct Cpu {
 
         while (true) {
             try {
-                u32 opcode = mmap->load32(reg.pc);
+                u32 opcode = mmap->load32(VAddress{reg.pc});
                 DecodedOp decodedOp = decode(opcode, prevDecoded);
                 println("{}", decodedOp);
 
@@ -868,7 +988,6 @@ struct Cpu {
                         prevDecoded.newState = State::OverWritten;
                     }
                 }
-
 
                 reg.pc += 4;
 
@@ -890,33 +1009,6 @@ struct Cpu {
                     extractBits(cop0.sr, cop0.BEV, 1) ? 0xbfc00180 : 0x80000080;
             }
         }
-    }
-
-    // shifts the extractedBits to least significant end.
-    u32 extractBits(u32 opcode, u32 start, u32 length) {
-        const u32 end = sizeof(opcode) * 8 - 1;
-        assert(end >= start && start + length - 1 <= end);
-
-        u32 shifted = opcode >> start;
-        u32 mask = static_cast<u64>(1 << length) - 1;
-
-        assert((shifted & mask) <= static_cast<u64>(1 << length) - 1);
-        return shifted & mask;
-    }
-
-    // replaces the bits in dst with the bits in src acorrding to the bitRange.
-    u32 replaceBitRange(const u32 dst, const u32 dstStart, const u32 src,
-                        const u32 srcStart, const u32 length) {
-        static_assert(sizeof(dst) == sizeof(src));
-        assert(bitSize<u32>() >= length + dstStart);
-        assert(bitSize<u32>() >= length + srcStart);
-        const u32 lengthOfOnes = (1 << length) - 1;
-        const u32 dstMask = ~(lengthOfOnes << dstStart);
-        const u32 srcMask = lengthOfOnes << srcStart;
-        const s32 distance = dstStart - srcStart;
-
-        return distance <= 0 ? (dst & dstMask) | ((src & srcMask) >> -distance)
-                             : (dst & dstMask) | ((src & srcMask) << distance);
     }
 
     DecodedOp decode(const u32 opcode, const DecodedOp &prevInstr) {
@@ -1060,6 +1152,10 @@ struct Cpu {
             case SLL:
                 return {State::NoLoadDelay, reg.pc,
                         WriteDecodedOp{rd, sll(reg.gpr[rt], imm5)}, SLL};
+            case OR:
+                return {State::NoLoadDelay, reg.pc,
+                        WriteDecodedOp{rd, orInstr(reg.gpr[rs], reg.gpr[rt])},
+                        OR};
             default:
                 throw runtime_error{format(
                     "Invalid opcode/Not implemented Yet: {:032b}, "
@@ -1070,6 +1166,8 @@ struct Cpu {
         };
     }
 
+    u32 orInstr(const u32 s, const u32 t) { return s | t; }
+
     u32 j(const u32 currPC, const u32 imm26) {
         assert(imm26 <= (1 << 26) - 1);
         return ((currPC + 4) & 0xF0000000) + (imm26 << 2);
@@ -1078,20 +1176,20 @@ struct Cpu {
     u32 sw(const u32 value, const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
         if (addr % 4 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
-        mmap->store32(addr, value);
+        mmap->store32(VAddress{addr}, value);
         return addr;
     }
 
     u32 sh(const u32 value, const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
         if (addr % 2 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
-        mmap->store16(addr, value);
+        mmap->store16(VAddress{addr}, value);
         return addr;
     }
 
     u32 sb(const u32 value, const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
-        mmap->store8(addr, value);
+        mmap->store8(VAddress{addr}, value);
         return addr;
     }
 
@@ -1108,7 +1206,7 @@ struct Cpu {
     tuple<u32, u32> lwr(const u32 dest, const u32 base, const s16 offset) {
         const u32 addr = base + offset;
         const u32 wordAddr = (addr / 4) * 4;
-        const u32 src = mmap->load32(wordAddr);
+        const u32 src = mmap->load32(VAddress{wordAddr});
         const u32 bitLength = (addr - wordAddr + 1) * 8;
         return {replaceBitRange(dest, 0, src,
                                 static_cast<u32>(bitSize<u32>() - bitLength),
@@ -1121,7 +1219,7 @@ struct Cpu {
     tuple<u32, u32> lwl(const u32 dest, const u32 base, const s16 offset) {
         const u32 addr = base + offset;
         const u32 wordAddr = (addr / 4) * 4;
-        const u32 src = mmap->load32(wordAddr);
+        const u32 src = mmap->load32(VAddress{wordAddr});
         const u32 bitLength = (addr - wordAddr + 1) * 8;
         return {
             replaceBitRange(dest, static_cast<u32>(bitSize<u32>() - bitLength),
@@ -1131,30 +1229,30 @@ struct Cpu {
 
     tuple<u32, u32> lb(const u32 s, const s16 imm16) {
         // implicit sign-extension, this does not work in 1's complement.
-        return {static_cast<s8>(mmap->load8(s + imm16)), s + imm16};
+        return {static_cast<s8>(mmap->load8(VAddress{s + imm16})), s + imm16};
     }
 
     tuple<u32, u32> lbu(const u32 s, const s16 imm16) {
-        return {mmap->load8(s + imm16), s + imm16};
+        return {mmap->load8(VAddress{s + imm16}), s + imm16};
     }
 
     // implicit sign-extension, this does not work in 1's complement.
     tuple<u32, u32> lh(const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
         if (addr % 2 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
-        return {static_cast<s16>(mmap->load16(s + imm16)), addr};
+        return {static_cast<s16>(mmap->load16(VAddress{s + imm16})), addr};
     }
 
     tuple<u32, u32> lhu(const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
         if (addr % 2 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
-        return {mmap->load16(addr), addr};
+        return {mmap->load16(VAddress{addr}), addr};
     }
 
     tuple<u32, u32> lw(const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
         if (addr % 4 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
-        return {mmap->load32(s + imm16), addr};
+        return {mmap->load32(VAddress{s + imm16}), addr};
     }
 
     s32 addi(const s32 s, const s16 imm16) {
