@@ -258,7 +258,8 @@ struct PAddress {
 };
 
 // TODO: Change the code so that the order of an enum never matters.
-// TODO: Change the code so that if ranges get changed by bios, the addresses are some sort of not_initliazed value.
+// TODO: Change the code so that if ranges get changed by bios, the addresses
+// are some sort of not_initliazed value.
 class MMap {
     // User Memory: KUSEG is intended to contain 2GB virtual memory (on extended
     // MIPS processors), the PSX doesn't support virtual memory, and KUSEG
@@ -305,17 +306,6 @@ class MMap {
     AddressedValue<u32> cacheCtrlReg{Range{0xFFFE0130, 4}};
     AddressedValue<u32> comDelay{Range{0x1F801020, 4}};
 
-    enum class BufferType {
-        Ram,
-        E1,
-        Scratchpad,
-        Io,
-        E2,
-        E3,
-        Bios,
-        CacheCtrl,
-    };
-
     // TODO: make it so that this is somehow with resepct to the addresses.
     enum class DelayIdx {
         E1_DELAY,
@@ -325,28 +315,6 @@ class MMap {
         CDROM_DELAY,
         E2_DELAY
     };
-
-    span<const u8> getReadBuffer(BufferType type) {
-        using enum BufferType;
-        switch (type) {
-            case Ram:
-                return ramBuffer;
-            case E1:
-                return e1Buffer;
-            case Scratchpad:
-                return scratchpadBuffer;
-            case E2:
-                return e2Buffer;
-            case E3:
-                return e3Buffer;
-            case Bios:
-                return biosBuffer.value;
-            case Io:
-                assert(false);
-            case CacheCtrl:
-                assert(false);
-        }
-    }
 
     u32 getMemCtrl1Reg(const PAddress pAddr) {
         const u32 addr = pAddr.m_addr;
@@ -454,88 +422,6 @@ class MMap {
         }
     }
 
-    span<u8> getWriteBuffer(BufferType type) {
-        using enum BufferType;
-        switch (type) {
-            case Ram:
-                return ramBuffer;
-            case E1:
-                return e1Buffer;
-            case Scratchpad:
-                return scratchpadBuffer;
-            case E2:
-                return e2Buffer;
-            case E3:
-                return e3Buffer;
-            case Io:
-                assert(false);
-            case Bios:
-                assert(false);
-            case CacheCtrl:
-                assert(false);
-        }
-    }
-
-    BufferType getType(const PAddress pAddr) {
-        const u32 addr = pAddr.m_addr;
-        using enum BufferType;
-        if (RAM_RANGE.contains(addr)) {
-            println("RAM");
-            assert(false);
-            return Ram;
-        } else if (E1_RANGE.contains(addr)) {
-            println("E1");
-            assert(false);
-            return E1;
-        } else if (SCRATCHPAD_RANGE.contains(addr)) {
-            println("SCRATCHPAD_RANGE");
-            assert(false);
-            return Scratchpad;
-        } else if (IO_RANGE.contains(addr)) {
-            println("IO_RANGE");
-            return Io;
-        } else if (E2_RANGE.contains(addr)) {
-            println("E2_RANGE");
-            assert(false);
-            return E2;
-        } else if (E3_RANGE.contains(addr)) {
-            println("E3_RANGE");
-            assert(false);
-            return E3;
-        } else if (biosBuffer.range.contains(addr)) {
-            return Bios;
-        } else if (cacheCtrlReg.range.contains(addr)) {
-            assert(false);
-            return CacheCtrl;
-        } else {
-            println("{}", addr);
-            assert(false);
-        }
-    }
-
-    u32 getOffset(const BufferType type, const PAddress pAddr) {
-        const u32 addr = pAddr.m_addr;
-        using enum BufferType;
-        switch (type) {
-            case Ram:
-                return RAM_RANGE.getOffset(addr);
-            case E1:
-                return E1_RANGE.getOffset(addr);
-            case Scratchpad:
-                return SCRATCHPAD_RANGE.getOffset(addr);
-            case Io:
-                return IO_RANGE.getOffset(addr);
-            case E2:
-                return E2_RANGE.getOffset(addr);
-            case E3:
-                return E3_RANGE.getOffset(addr);
-            case Bios:
-                return biosBuffer.range.getOffset(addr);
-            default:
-                assert(false);
-        }
-    }
-
     // TODO: need to implement this behaviour, KSEG1 addresses can't access
     // scratchpad.
     PAddress getPAddr(const VAddress vAddr) {
@@ -555,9 +441,10 @@ class MMap {
             assert(false);
     }
 
-    u32 handleRead(const VAddress vAddr, const u8 numOfBytes) {
+    u32 handleRead(const PAddress paddr, const u8 numOfBytes) {
         assert(numOfBytes <= 4);
-        const u32 addr = getPAddr(vAddr).m_addr;
+        const u32 addr = paddr.m_addr;
+
         if (RAM_RANGE.contains(addr)) {
             println("RAM");
             assert(false);
@@ -586,7 +473,45 @@ class MMap {
             }
             return accBytes;
         } else if (cacheCtrlReg.range.contains(addr)) {
+            println("CacheCtrl");
             return cacheCtrlReg.value;
+        } else {
+            println("{}", addr);
+            assert(false);
+        }
+    }
+
+    void handleWrite(const PAddress paddr, const u32 value,
+                     const u8 numOfBytes) {
+        assert(numOfBytes <= 4);
+        const u32 addr = paddr.m_addr;
+
+        if (RAM_RANGE.contains(addr)) {
+            println("RAM");
+            assert(false);
+        } else if (E1_RANGE.contains(addr)) {
+            println("E1");
+            assert(false);
+        } else if (SCRATCHPAD_RANGE.contains(addr)) {
+            println("SCRATCHPAD_RANGE");
+            assert(false);
+        } else if (IO_RANGE.contains(addr)) {
+            println("IO_RANGE");
+            writeIoReg(paddr, value);
+        } else if (E2_RANGE.contains(addr)) {
+            println("E2_RANGE");
+            assert(false);
+        } else if (E3_RANGE.contains(addr)) {
+            println("E3_RANGE");
+            assert(false);
+        } else if (biosBuffer.range.contains(addr)) {
+            assert(false);
+        } else if (cacheCtrlReg.range.contains(addr)) {
+            println("cacheCtrlReg");
+            println("{:0b}", value);
+            // assert(extractBits(value, 3, 1) == 1);
+            // assert(extractBits(value, 7, 1) == 1);
+            cacheCtrlReg.value = value;
         } else {
             println("{}", addr);
             assert(false);
@@ -606,41 +531,22 @@ class MMap {
 
     // need to refactor the way shits read/stored;
     u32 load32(VAddress vAddr) {
-        const PAddress pAddr = getPAddr(vAddr);
-        BufferType type = getType(pAddr);
-
-        span<const u8> buffer = getReadBuffer(type);
-        const u32 offset = getOffset(type, pAddr);
-        assert(buffer.size() > offset + 3);
-        u32 byte0 = (u32)buffer[offset + 0];
-        u32 byte1 = (u32)buffer[offset + 1] << 8;
-        u32 byte2 = (u32)buffer[offset + 2] << 16;
-        u32 byte3 = (u32)buffer[offset + 3] << 24;
-
-        return byte0 | byte1 | byte2 | byte3;
+        const PAddress paddr = getPAddr(vAddr);
+        return handleRead(paddr, 4);
     }
 
     u16 load16(VAddress vAddr) {
-        const PAddress pAddr = getPAddr(vAddr);
-        BufferType type = getType(pAddr);
-        span<const u8> buffer = getReadBuffer(type);
-        const u32 offset = getOffset(type, pAddr);
-
-        assert(buffer.size() > offset + 1);
-        u32 byte0 = (u32)buffer[offset];
-        u32 byte1 = (u32)buffer[offset + 1] << 8;
-        return byte0 | byte1;
+        const PAddress paddr = getPAddr(vAddr);
+        const u32 value = handleRead(paddr, 2);
+        assert(value <= bitSize<u16>());
+        return value;
     }
 
     u8 load8(VAddress vAddr) {
-        const PAddress pAddr = getPAddr(vAddr);
-        BufferType type = getType(pAddr);
-        span<const u8> buffer = getReadBuffer(type);
-        const u32 offset = getOffset(type, pAddr);
-
-        assert(buffer.size() > offset);
-        u32 byte0 = (u32)buffer[offset];
-        return byte0;
+        const PAddress paddr = getPAddr(vAddr);
+        const u32 value = handleRead(paddr, 1);
+        assert(value <= bitSize<u8>());
+        return value;
     }
 
     // TODO: During an 8-bit or 16-bit store, all 32 bits of the GPR are placed
@@ -652,55 +558,17 @@ class MMap {
     // that will never be fired.
     void store32(const VAddress vAddr, const u32 value) {
         const PAddress pAddr = getPAddr(vAddr);
-        const BufferType type = getType(pAddr);
-
-        if (type == BufferType::Io) {
-            writeIoReg(pAddr, value);
-            return;
-        }
-
-        span<u8> buffer = getWriteBuffer(type);
-        const u32 offset = getOffset(type, pAddr);
-
-        assert(buffer.size() > offset + 3);
-        buffer[0] = value & 0x00'00'00'FF;
-        buffer[1] = value & 0x00'00'FF'00;
-        buffer[2] = value & 0x00'FF'00'00;
-        buffer[3] = value & 0xFF'00'00'00;
+        handleWrite(pAddr, value, 4);
     }
 
     void store16(const VAddress vAddr, const u32 value) {
         const PAddress pAddr = getPAddr(vAddr);
-        const BufferType type = getType(pAddr);
-
-        if (type == BufferType::Io) {
-            writeIoReg(pAddr, value);
-            return;
-        }
-
-        span<u8> buffer = getWriteBuffer(type);
-        const u32 offset = getOffset(type, pAddr);
-
-        assert(buffer.size() > offset + 1);
-
-        buffer[0] = value & 0x00'00'00'FF;
-        buffer[1] = value & 0x00'00'FF'00;
+        handleWrite(pAddr, value, 2);
     }
 
     void store8(const VAddress vAddr, const u32 value) {
         const PAddress pAddr = getPAddr(vAddr);
-        const BufferType type = getType(pAddr);
-
-        if (type == BufferType::Io) {
-            writeIoReg(pAddr, value);
-            return;
-        }
-
-        span<u8> buffer = getWriteBuffer(type);
-        const u32 offset = getOffset(type, pAddr);
-
-        assert(buffer.size() > offset);
-        buffer[0] = value & 0x00'00'00'FF;
+        handleWrite(pAddr, value, 1);
     }
 };
 
