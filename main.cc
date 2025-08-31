@@ -12,7 +12,6 @@
 #include <fstream>
 #include <iostream>
 #include <print>
-#include <span>
 #include <stdexcept>
 #include <utility>
 #include <variant>
@@ -572,23 +571,6 @@ class MMap {
     }
 };
 
-struct COP0 {
-    array<u32, 64> gpr{};
-    u32 &cause;
-    u32 &epc;
-    u32 &sr;
-    const u32 BEV = 22;
-    COP0() : cause{gpr[13]}, epc{gpr[14]}, sr{gpr[12]} { sr |= (1 << BEV); }
-
-    u32 srStackPush(bool isKernalMode, bool isInterruptEnabled) {
-        u32 protectionBitsMask = (isKernalMode << 1) | isInterruptEnabled;
-
-        u32 srStack = 0b1111 & sr;
-        srStack = (srStack << 2) | protectionBitsMask;
-        return (sr & 0b000000) | srStack;
-    }
-};
-
 enum class State { NoLoadDelay, SpecialLoadDelay, LoadDelay, OverWritten };
 
 enum class Type { Load, Write, Branch, Store };
@@ -625,13 +607,6 @@ struct DecodedOp {
     variant<LoadDecodedOp, WriteDecodedOp, BranchDecodedOp, StoreDecodedOp>
         instr;
     variant<PrimaryOps, SecondaryOps> opcode;
-
-    DecodedOp(
-        State newState, u32 pc,
-        variant<LoadDecodedOp, WriteDecodedOp, BranchDecodedOp, StoreDecodedOp>
-            instr,
-        variant<PrimaryOps, SecondaryOps> opcode)
-        : newState{newState}, pc{pc}, instr{instr}, opcode{opcode} {}
 };
 
 string getPrimaryOpString(const PrimaryOps opcode) {
@@ -796,18 +771,18 @@ struct formatter<DecodedOp> {
     auto format(const DecodedOp &decodedOp, auto &ctx) const {
         const string opcodeString = getOpcodeString(decodedOp.opcode);
         if (auto instr = get_if<WriteDecodedOp>(&decodedOp.instr)) {
-            return format_to(ctx.out(), "PC:{:X}  {}: ${}={:X}", decodedOp.pc,
+            return format_to(ctx.out(), "PC:0x{:X}  {}: ${}=0x{:X}", decodedOp.pc,
                              opcodeString, instr->dstRegId, instr->value);
         } else if (auto instr = get_if<LoadDecodedOp>(&decodedOp.instr)) {
-            return format_to(ctx.out(), "PC:{:X}  {}: ${}=[{:X}]={:X}",
+            return format_to(ctx.out(), "PC:0x{:X}  {}: ${}=[0x{:X}]=0x{:X}",
                              decodedOp.pc, opcodeString, instr->dstRegId,
                              instr->addr, instr->value);
         } else if (auto instr = get_if<StoreDecodedOp>(&decodedOp.instr)) {
-            return format_to(ctx.out(), "PC:{:X}  {}: [{:X}]={:X}",
+            return format_to(ctx.out(), "PC:0x{:X}  {}: [0x{:X}]=0x{:X}",
                              decodedOp.pc, opcodeString, instr->dstAddr,
                              instr->value);
         } else if (auto instr = get_if<BranchDecodedOp>(&decodedOp.instr)) {
-            return format_to(ctx.out(), "PC:{:X} {}: $PC={:X}", decodedOp.pc,
+            return format_to(ctx.out(), "PC:0x{:X} {}: $PC=0x{:X}", decodedOp.pc,
                              opcodeString, instr->pc);
         } else {
             assert(false);
@@ -815,6 +790,28 @@ struct formatter<DecodedOp> {
     }
 };
 
+struct COP0 {
+    constexpr static u32 BEV = 22;
+
+    array<u32, 16> gpr{};
+    array<u32, 32> ctrl{};
+
+    u32 &cause;
+    u32 &epc;
+    u32 &sr;
+
+    COP0() : cause{gpr[13]}, epc{gpr[14]}, sr{gpr[12]} { sr |= (1 << BEV); }
+
+    u32 srStackPush(bool isKernalMode, bool isInterruptEnabled) {
+        u32 protectionBitsMask = (isKernalMode << 1) | isInterruptEnabled;
+
+        u32 srStack = 0b1111 & sr;
+        srStack = (srStack << 2) | protectionBitsMask;
+        return (sr & 0b000000) | srStack;
+    }
+};
+
+// TODO: rewrite.
 struct Cpu {
     constexpr static u32 RESET_VECTOR = 0xBFC00000;
     const DecodedOp ZERO_INSTR;
@@ -976,8 +973,12 @@ struct Cpu {
                 return {State::NoLoadDelay, reg.pc,
                         WriteDecodedOp{rt, ori(reg.gpr[rs], imm16)}, ORI};
             case J:
-                return {State::NoLoadDelay, reg.pc,
-                        BranchDecodedOp{j(reg.pc, imm26)}, J};
+                return {.newState = State::NoLoadDelay,
+                        .pc = reg.pc,
+                        .instr = BranchDecodedOp{j(reg.pc, imm26)},
+                        .opcode = J};
+            case COP0:
+                return handleCOP0(rt, rd, imm16, opcode);
             default:
                 throw runtime_error{format(
                     "Invalid opcode/Not implemented Yet: {:032b}, "
@@ -986,6 +987,50 @@ struct Cpu {
                     opcode, primaryOp,
                     getPrimaryOpString(static_cast<PrimaryOps>(primaryOp)))};
         };
+    }
+
+    DecodedOp handleCOP0(const u32 rt, const u32 rd, const s16 imm16,
+                         const u32 opcode) {
+        const u8 rs = uintNoTruncCast<u8>(extractBits(opcode, 21, 5));
+        const u8 isTrue = extractBits(opcode, 16, 5);
+        const u8 cmd = extractBits(opcode, 0, 6);
+
+        enum COPOpcode {
+            MFC0 = 0b00000,
+            CFC0 = 0b00010,
+            MTC0 = 0b00100,
+            CTC0 = 0b00110,
+            BC0 = 0b01000,
+            RFE = 0b10000
+        };
+
+        switch (rs) {
+            case MFC0:
+                assert(rd < cop0.gpr.size());
+                return {.newState = State::LoadDelay,
+                        .pc = reg.pc,
+                        .instr = LoadDecodedOp{rt, cop0.gpr[rd], rd},
+                        .opcode = PrimaryOps::COP0};
+            case MTC0: {
+                cop0.gpr[rd] = reg.gpr[rt];
+                return {.newState = State::NoLoadDelay,
+                        .pc = reg.pc,
+                        .instr = StoreDecodedOp{reg.gpr[rt], rd},
+                        .opcode = PrimaryOps::COP0};
+            }
+            case CFC0:
+                assert(false);
+            case CTC0:
+                assert(false);
+            case BC0:
+                assert(false);
+                assert(isTrue == 0 || isTrue == 1);
+            case RFE:
+                assert(false);
+                assert(cmd == 0x10);
+            default:
+                assert(false);
+        }
     }
 
     DecodedOp decodeSecondary(const u32 opcode) {
