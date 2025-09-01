@@ -520,11 +520,11 @@ class MMap {
    public:
     MMap() {
         struct stat info;
-        stat("SCPH1001.BIN", &info);
+        stat("./BIOS/SCPH1001.BIN", &info);
         if (biosBuffer.value.size() != info.st_size)
             throw runtime_error{"size of BIOS is not 512KB"};
 
-        ifstream bios{"SCPH1001.BIN", ios::binary | ios::in};
+        ifstream bios{"./BIOS/SCPH1001.BIN", ios::binary | ios::in};
         bios.read((char *)biosBuffer.value.data(), biosBuffer.value.size());
     }
 
@@ -771,8 +771,9 @@ struct formatter<DecodedOp> {
     auto format(const DecodedOp &decodedOp, auto &ctx) const {
         const string opcodeString = getOpcodeString(decodedOp.opcode);
         if (auto instr = get_if<WriteDecodedOp>(&decodedOp.instr)) {
-            return format_to(ctx.out(), "PC:0x{:X}  {}: ${}=0x{:X}", decodedOp.pc,
-                             opcodeString, instr->dstRegId, instr->value);
+            return format_to(ctx.out(), "PC:0x{:X}  {}: ${}=0x{:X}",
+                             decodedOp.pc, opcodeString, instr->dstRegId,
+                             instr->value);
         } else if (auto instr = get_if<LoadDecodedOp>(&decodedOp.instr)) {
             return format_to(ctx.out(), "PC:0x{:X}  {}: ${}=[0x{:X}]=0x{:X}",
                              decodedOp.pc, opcodeString, instr->dstRegId,
@@ -782,8 +783,8 @@ struct formatter<DecodedOp> {
                              decodedOp.pc, opcodeString, instr->dstAddr,
                              instr->value);
         } else if (auto instr = get_if<BranchDecodedOp>(&decodedOp.instr)) {
-            return format_to(ctx.out(), "PC:0x{:X} {}: $PC=0x{:X}", decodedOp.pc,
-                             opcodeString, instr->pc);
+            return format_to(ctx.out(), "PC:0x{:X} {}: $PC=0x{:X}",
+                             decodedOp.pc, opcodeString, instr->pc);
         } else {
             assert(false);
         }
@@ -794,13 +795,47 @@ struct COP0 {
     constexpr static u32 BEV = 22;
 
     array<u32, 16> gpr{};
-    array<u32, 32> ctrl{};
 
-    u32 &cause;
-    u32 &epc;
-    u32 &sr;
+    enum idx {
+        BPC = 3,
+        BDA = 5,
+        TAR = 6,
+        DCIC = 7,
+        BadA = 8,
+        BDAM = 9,
+        BPCM = 11,
+        SR = 12,
+        CAUSE = 13,
+        EPC = 14,
+        PRID = 15,
+    };
 
-    COP0() : cause{gpr[13]}, epc{gpr[14]}, sr{gpr[12]} { sr |= (1 << BEV); }
+    u32 &bpc;    // Breakpoint Program Counter
+    u32 &bda;    // Breakpoint Data Address
+    u32 &tar;    // Target Address
+    u32 &dcic;   // Debug and Cache Invalidate Control
+    u32 &bada;   // Bad Address
+    u32 &bdam;   // Breakpoint Data Address Mask
+    u32 &bpcm;   // Breakpoint Program Counter Mask
+    u32 &sr;     // Status Register
+    u32 &cause;  // Cause of the last exception
+    u32 &epc;    // Exception Program Counter
+    u32 &prid;   // Processor Revision Identifier
+
+    COP0()
+        : bpc{gpr[BPC]},
+          bda{gpr[BDA]},
+          tar{gpr[TAR]},
+          dcic{gpr[DCIC]},
+          bada{gpr[BadA]},
+          bdam{gpr[BDAM]},
+          bpcm{gpr[BPCM]},
+          sr{gpr[SR]},
+          cause{gpr[CAUSE]},
+          epc{gpr[EPC]},
+          prid{gpr[PRID]} {
+        sr |= (1 << BEV);
+    }
 
     u32 srStackPush(bool isKernalMode, bool isInterruptEnabled) {
         u32 protectionBitsMask = (isKernalMode << 1) | isInterruptEnabled;
@@ -978,7 +1013,7 @@ struct Cpu {
                         .instr = BranchDecodedOp{j(reg.pc, imm26)},
                         .opcode = J};
             case COP0:
-                return handleCOP0(rt, rd, imm16, opcode);
+                return handleCOP0(rs, rt, rd, imm16);
             default:
                 throw runtime_error{format(
                     "Invalid opcode/Not implemented Yet: {:032b}, "
@@ -989,20 +1024,9 @@ struct Cpu {
         };
     }
 
-    DecodedOp handleCOP0(const u32 rt, const u32 rd, const s16 imm16,
-                         const u32 opcode) {
-        const u8 rs = uintNoTruncCast<u8>(extractBits(opcode, 21, 5));
-        const u8 isTrue = extractBits(opcode, 16, 5);
-        const u8 cmd = extractBits(opcode, 0, 6);
-
-        enum COPOpcode {
-            MFC0 = 0b00000,
-            CFC0 = 0b00010,
-            MTC0 = 0b00100,
-            CTC0 = 0b00110,
-            BC0 = 0b01000,
-            RFE = 0b10000
-        };
+    DecodedOp handleCOP0(const u32 rs, const u32 rt, const u32 rd,
+                         const s16 imm16) {
+        enum COP0Opcode { MFC0 = 0b00000, MTC0 = 0b00100, RFE = 0b10000 };
 
         switch (rs) {
             case MFC0:
@@ -1013,25 +1037,20 @@ struct Cpu {
                         .opcode = PrimaryOps::COP0};
             case MTC0: {
                 cop0.gpr[rd] = reg.gpr[rt];
+                updateCpuEnv();
                 return {.newState = State::NoLoadDelay,
                         .pc = reg.pc,
                         .instr = StoreDecodedOp{reg.gpr[rt], rd},
                         .opcode = PrimaryOps::COP0};
             }
-            case CFC0:
-                assert(false);
-            case CTC0:
-                assert(false);
-            case BC0:
-                assert(false);
-                assert(isTrue == 0 || isTrue == 1);
             case RFE:
                 assert(false);
-                assert(cmd == 0x10);
             default:
                 assert(false);
         }
     }
+
+    void updateCpuEnv() {}
 
     DecodedOp decodeSecondary(const u32 opcode) {
         const u8 secondaryOp = uintNoTruncCast<u8>(extractBits(opcode, 0, 6));
@@ -1208,10 +1227,4 @@ int main() {
     } catch (...) {
         println("uncaught");
     }
-
-    // assert(cpu.replaceBitRange(0b10001, 0, 0b00000, 0, 5) == 0);
-    // assert(cpu.replaceBitRange(0b10001, 0, 0b00000, 0, 1) == 0b10000);
-    // assert(cpu.replaceBitRange(0b10001, 1, 0b10000, 4, 1) == 0b10011);
-    // assert(cpu.replaceBitRange(0x0A'0B'0C'0D, 8, 0x00'01'02'03, 0, 24) ==
-    //        0x01'02'03'0D);
 }
