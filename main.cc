@@ -270,9 +270,8 @@ class MMap {
     static constexpr Range KSEG1_RANGE{0xA0000000, 512 * MB};
     static constexpr Range KSEG2_RANGE{0xC0000000, GB};
 
-    // TODO: No support for 8 MB ram, mirrored to 2 MB.
-    Range RAM_RANGE{0x00000000, 2 * MB, 2 * MB - 1};
-    array<u8, 2 * MB> ramBuffer;
+    AddressedValue<array<u8, 2 * MB>> ramBuffer{
+        Range{0x00000000, 2 * MB, 2 * MB - 1}};
 
     Range E1_RANGE{0x1F000000, 512 * KB};
     array<u8, 512 * KB> e1Buffer;
@@ -299,7 +298,7 @@ class MMap {
 
     // not used by psx.
     Range E3_RANGE{0x1FA00000, 2 * MB};
-    array<u8, 0> e3Buffer;
+    // array<u8, 0> e3Buffer;
 
     AddressedValue<array<u8, 512 * KB>> biosBuffer{{0x1FC00000, 512 * KB}};
     AddressedValue<u32> cacheCtrlReg{Range{0xFFFE0130, 4}};
@@ -315,8 +314,15 @@ class MMap {
         E2_DELAY
     };
 
-    u32 getMemCtrl1Reg(const PAddress pAddr) {
-        const u32 addr = pAddr.m_addr;
+    u32 getMemCtrl1DelayRegIdx(const PAddress paddr) {
+        assert(memCtrl1DelayRegs.range.contains(paddr.m_addr));
+        const u32 idx = memCtrl1DelayRegs.range.getOffset(paddr.m_addr) / 4;
+        assert(idx < memCtrl1DelayRegs.value.size());
+        return idx;
+    }
+
+    u32 getMemCtrl1Reg(const PAddress paddr) {
+        const u32 addr = paddr.m_addr;
 
         if (e1BaseAddr.range.contains(addr)) {
             return e1BaseAddr.value;
@@ -324,10 +330,7 @@ class MMap {
             return e2BaseAddr.value;
         }
 
-        assert(memCtrl1DelayRegs.range.contains(addr));
-        const u32 idx = memCtrl1DelayRegs.range.getOffset(addr) / 4;
-        assert(idx < memCtrl1DelayRegs.value.size());
-        return memCtrl1DelayRegs.value[idx].value;
+        return memCtrl1DelayRegs.value[getMemCtrl1DelayRegIdx(paddr)].value;
     }
 
     u32 getIoReg(const PAddress pAddr) {
@@ -341,16 +344,11 @@ class MMap {
         }
     }
 
-    // should try to minimize side effects like these.
     void updateDelayRegState(const DelayIdx idx) {
         array<Range *, 6> dict = {&E1_RANGE,  &E3_RANGE,    &biosBuffer.range,
                                   &SPU_RANGE, &CDROM_RANGE, &E2_RANGE};
 
         assert(static_cast<u32>(idx) < dict.size());
-        // assert(static_cast<u32>(idx) != 1);
-        // assert(static_cast<u32>(idx) != 3);
-        // assert(static_cast<u32>(idx) != 4);
-        // assert(static_cast<u32>(idx) != 5);
 
         dict[static_cast<u32>(idx)]->byteLength =
             (1 << memCtrl1DelayRegs.value[static_cast<u32>(idx)]
@@ -377,11 +375,13 @@ class MMap {
             case E2_DELAY:
                 println("E2_DELAY, Length:{}", byteLength);
                 break;
+            default:
+                assert(false);
         }
     }
 
-    void writeMemCtrl1Register(const PAddress pAddr, const u32 value) {
-        const u32 addr = pAddr.m_addr;
+    void writeMemCtrl1Register(const PAddress paddr, const u32 value) {
+        const u32 addr = paddr.m_addr;
         if (e1BaseAddr.range.contains(addr)) {
             assert(extractBits(value, 24, 8) == 0x1F);
             assert(value == 0x1F000000);
@@ -392,9 +392,8 @@ class MMap {
             assert(value == 0x1F802000);
             println("e2BaseAddr");
             e2BaseAddr.range.start = value;
-        } else if (memCtrl1DelayRegs.range.contains(pAddr.m_addr)) {
-            const u32 idx = memCtrl1DelayRegs.range.getOffset(pAddr.m_addr) / 4;
-            assert(idx < memCtrl1DelayRegs.value.size());
+        } else if (memCtrl1DelayRegs.range.contains(paddr.m_addr)) {
+            const u32 idx = getMemCtrl1DelayRegIdx(paddr);
             memCtrl1DelayRegs.value[idx] = value;
             updateDelayRegState(static_cast<DelayIdx>(idx));
         } else if (comDelay.range.contains(addr)) {
@@ -414,15 +413,13 @@ class MMap {
             const bitset<32> bits = value;
             const u8 ramRangeChoice = (bits[11] << 1) | bits[9];
             const array<u8, 4> ramSizes{1, 4, 2, 8};
-            RAM_RANGE.byteLength = ramSizes[ramRangeChoice];
+            ramBuffer.range.byteLength = ramSizes[ramRangeChoice] * MB;
             ramSize.value = value;
         } else {
             assert(false);
         }
     }
 
-    // TODO: need to implement this behaviour, KSEG1 addresses can't access
-    // scratchpad.
     PAddress getPAddr(const VAddress vAddr) {
         const u32 addr = vAddr.m_addr;
         const bool condition = KSEG1_RANGE.contains(addr) ||
@@ -444,7 +441,7 @@ class MMap {
         assert(numOfBytes <= 4);
         const u32 addr = paddr.m_addr;
 
-        if (RAM_RANGE.contains(addr)) {
+        if (ramBuffer.range.contains(addr)) {
             println("RAM");
             assert(false);
         } else if (E1_RANGE.contains(addr)) {
@@ -463,12 +460,12 @@ class MMap {
             println("E3_RANGE");
             assert(false);
         } else if (biosBuffer.range.contains(addr)) {
-            const u32 offset = biosBuffer.range.getOffset(addr);
-            assert(biosBuffer.value.size() >= offset + numOfBytes);
+            const u32 idx = biosBuffer.range.getOffset(addr);
+            assert(biosBuffer.value.size() >= idx + numOfBytes);
             u32 accBytes{0};
             for (int i = 0; i < numOfBytes; ++i) {
                 accBytes |=
-                    static_cast<u32>(biosBuffer.value[offset + i] << (8 * i));
+                    static_cast<u32>(biosBuffer.value[idx + i] << (8 * i));
             }
             return accBytes;
         } else if (cacheCtrlReg.range.contains(addr)) {
@@ -485,9 +482,13 @@ class MMap {
         assert(numOfBytes <= 4);
         const u32 addr = paddr.m_addr;
 
-        if (RAM_RANGE.contains(addr)) {
+        if (ramBuffer.range.contains(addr)) {
             println("RAM");
-            assert(false);
+            const u32 idx = ramBuffer.range.getOffset(addr);
+            assert(ramBuffer.value.size() >= idx + numOfBytes);
+            for (int i = 0; i < numOfBytes; ++i) {
+                ramBuffer.value[idx + i] = value & (0xFF << (8 * i));
+            }
         } else if (E1_RANGE.contains(addr)) {
             println("E1");
             assert(false);
@@ -508,8 +509,6 @@ class MMap {
         } else if (cacheCtrlReg.range.contains(addr)) {
             println("cacheCtrlReg");
             println("{:0b}", value);
-            // assert(extractBits(value, 3, 1) == 1);
-            // assert(extractBits(value, 7, 1) == 1);
             cacheCtrlReg.value = value;
         } else {
             println("{}", addr);
@@ -548,13 +547,6 @@ class MMap {
         return value;
     }
 
-    // TODO: During an 8-bit or 16-bit store, all 32 bits of the GPR are placed
-    // on the bus. As such, when writing to certain 32-bit IO registers with an
-    // 8 or 16-bit store, it will behave like a 32-bit store, using the
-    // register's full value. The soundscope on some shells is known to rely on
-    // this, as it uses sh to write to certain DMA registers. If this is not
-    // properly emulated, the soundscope will hang, waiting for an interrupt
-    // that will never be fired.
     void store32(const VAddress vAddr, const u32 value) {
         const PAddress pAddr = getPAddr(vAddr);
         handleWrite(pAddr, value, 4);
@@ -796,7 +788,7 @@ struct COP0 {
 
     array<u32, 16> gpr{};
 
-    enum idx {
+    enum IDX {
         BPC = 3,
         BDA = 5,
         TAR = 6,
@@ -844,6 +836,8 @@ struct COP0 {
         srStack = (srStack << 2) | protectionBitsMask;
         return (sr & 0b000000) | srStack;
     }
+
+    u32 srStackPop() { return replaceBitRange(sr, 0, sr, 2, 4); }
 };
 
 // TODO: rewrite.
@@ -1037,20 +1031,21 @@ struct Cpu {
                         .opcode = PrimaryOps::COP0};
             case MTC0: {
                 cop0.gpr[rd] = reg.gpr[rt];
-                updateCpuEnv();
                 return {.newState = State::NoLoadDelay,
                         .pc = reg.pc,
                         .instr = StoreDecodedOp{reg.gpr[rt], rd},
                         .opcode = PrimaryOps::COP0};
             }
             case RFE:
-                assert(false);
+                cop0.sr = cop0.srStackPop();
+                return {.newState = State::NoLoadDelay,
+                        .pc = reg.pc,
+                        .instr = WriteDecodedOp{0, 0},
+                        .opcode = PrimaryOps::COP0};
             default:
                 assert(false);
         }
     }
-
-    void updateCpuEnv() {}
 
     DecodedOp decodeSecondary(const u32 opcode) {
         const u8 secondaryOp = uintNoTruncCast<u8>(extractBits(opcode, 0, 6));
