@@ -259,6 +259,7 @@ struct PAddress {
 // TODO: Change the code so that the order of an enum never matters.
 // TODO: Change the code so that if ranges get changed by bios, the addresses
 // are some sort of not_initliazed value.
+// TODO: Implement caching.
 class MMap {
     // User Memory: KUSEG is intended to contain 2GB virtual memory (on extended
     // MIPS processors), the PSX doesn't support virtual memory, and KUSEG
