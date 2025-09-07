@@ -15,7 +15,10 @@
 #include <stdexcept>
 #include <utility>
 #include <variant>
+
+#include "BitUtils.hpp"
 using namespace std;
+using namespace BitUtils;
 
 using s8 = int8_t;
 using s16 = int16_t;
@@ -31,19 +34,9 @@ constexpr u32 KB = (1 << 10);
 constexpr u32 MB = (1 << 20);
 constexpr u32 GB = (1 << 30);
 
-template <typename T>
-constexpr size_t bitSize() noexcept {
-    return sizeof(T) * CHAR_BIT;
-}
-
-template <integral T>
-constexpr size_t numLimit() noexcept {
-    return (1 << bitSize<T>()) - 1;
-}
-
 template <unsigned_integral T, unsigned_integral U>
 constexpr T uintNoTruncCast(const U x) noexcept {
-    assert(numLimit<T>() >= x);
+    assert(NumLimit<T>() >= x);
     return static_cast<T>(x);
 }
 
@@ -63,8 +56,8 @@ u32 extractBits(u32 bits, u32 start, u32 length) {
 u32 replaceBitRange(const u32 dst, const u32 dstStart, const u32 src,
                     const u32 srcStart, const u32 length) {
     static_assert(sizeof(dst) == sizeof(src));
-    assert(bitSize<u32>() >= length + dstStart);
-    assert(bitSize<u32>() >= length + srcStart);
+    assert(NumOfBits<u32>() >= length + dstStart);
+    assert(NumOfBits<u32>() >= length + srcStart);
     const u32 lengthOfOnes = (1 << length) - 1;
     const u32 dstMask = ~(lengthOfOnes << dstStart);
     const u32 srcMask = lengthOfOnes << srcStart;
@@ -74,22 +67,20 @@ u32 replaceBitRange(const u32 dst, const u32 dstStart, const u32 src,
                          : (dst & dstMask) | ((src & srcMask) << distance);
 }
 
-// checkout table 3.2:
-// https://student.cs.uwaterloo.ca/~cs350/common/r3000-manual.pdf
 enum class ExcCode : u32 {
-    Int,
-    Mod,
-    TLBL,
-    TLBS,
-    AdEL,
-    AdES,
-    IBE,
-    DBE,
-    Syscall,
-    Bp,
-    RI,
-    CpU,
-    Ov
+    Int,      // Interrupt
+    Mod,      // TLB modification, the psx doesn't actually have a TLB.
+    TLBL,     // TLB Load
+    TLBS,     // TLB Store
+    AdEL,     // Address Error on Load or Instruction fetch.
+    AdES,     // Address Error on Store.
+    IBE,      // Instruction Fetch Bus Error
+    DBE,      // Data Load Bus Error
+    Syscall,  // Generated unconditionally by a syscall instruction
+    Bp,       // Breakpoint
+    RI,       // Reserved Instruction
+    CpU,      // Co-Processor unusable
+    Ov        // Arithmetic Overflow
 };
 
 // These contain the insturctions that use the most significant six bits of the
@@ -170,10 +161,25 @@ enum class SecondaryOps : u8 {
     SLTU = 0x2B,
 };
 
+enum class JumpOp : u8 {
+    BLTZ = 0x00,
+    BGEZ = 0x01,
+    J = 0x02,
+    JAL = 0x03,
+    BEQ = 0x04,
+    BNE = 0x05,
+    BLEZ = 0x06,
+    BGTZ = 0x07,
+    JR = 0x08,
+    JALR = 0x09,
+    BLTZAL = 0x10,
+    BGEZAL = 0x11,
+    COUNT
+};
+
 struct MipsException {
     const ExcCode CAUSE_CODE;
     const u32 EPC;
-
     MipsException(ExcCode CAUSE_CODE, u32 EPC)
         : CAUSE_CODE{CAUSE_CODE}, EPC{EPC} {}
 };
@@ -537,14 +543,14 @@ class MMap {
     u16 load16(VAddress vAddr) {
         const PAddress paddr = getPAddr(vAddr);
         const u32 value = handleRead(paddr, 2);
-        assert(value <= bitSize<u16>());
+        assert(value <= NumOfBits<u16>());
         return value;
     }
 
     u8 load8(VAddress vAddr) {
         const PAddress paddr = getPAddr(vAddr);
         const u32 value = handleRead(paddr, 1);
-        assert(value <= bitSize<u8>());
+        assert(value <= NumOfBits<u8>());
         return value;
     }
 
@@ -564,7 +570,13 @@ class MMap {
     }
 };
 
-enum class State { NoLoadDelay, SpecialLoadDelay, LoadDelay, OverWritten };
+enum class State {
+    NoLoadDelay,
+    SpecialLoadDelay,
+    LoadDelay,
+    OverWritten,
+    Linked
+};
 
 enum class Type { Load, Write, Branch, Store };
 
@@ -572,26 +584,20 @@ struct LoadDecodedOp {
     u32 dstRegId;
     u32 value;
     u32 addr;
-    LoadDecodedOp(u32 dstRegId, u32 value, u32 addr)
-        : dstRegId{dstRegId}, value{value}, addr{addr} {}
 };
 
 struct WriteDecodedOp {
     u32 dstRegId;
     u32 value;
-    WriteDecodedOp(u32 dstRegId, u32 value)
-        : dstRegId{dstRegId}, value{value} {}
 };
 
 struct BranchDecodedOp {
     u32 pc;
-    BranchDecodedOp(const u32 pc) : pc{pc} {}
 };
 
 struct StoreDecodedOp {
     u32 value;
     u32 dstAddr;
-    StoreDecodedOp(u32 value, u32 dstAddr) : value{value}, dstAddr{dstAddr} {}
 };
 
 struct DecodedOp {
@@ -599,7 +605,7 @@ struct DecodedOp {
     u32 pc;
     variant<LoadDecodedOp, WriteDecodedOp, BranchDecodedOp, StoreDecodedOp>
         instr;
-    variant<PrimaryOps, SecondaryOps> opcode;
+    variant<PrimaryOps, SecondaryOps, JumpOp> opcode;
 };
 
 string getPrimaryOpString(const PrimaryOps opcode) {
@@ -688,7 +694,7 @@ string getPrimaryOpString(const PrimaryOps opcode) {
     }
 }
 
-string getSecondaryOps(SecondaryOps opcode) {
+string getSecondaryOpString(SecondaryOps opcode) {
     using enum SecondaryOps;
     switch (opcode) {
         case SLL:
@@ -750,11 +756,46 @@ string getSecondaryOps(SecondaryOps opcode) {
     }
 }
 
-string getOpcodeString(const variant<PrimaryOps, SecondaryOps> &opcode) {
+string getJumpOpString(JumpOp opcode) {
+    using enum JumpOp;
+    switch (opcode) {
+        case BLTZ:
+            return "BLTZ";
+        case BGEZ:
+            return "BGEZ";
+        case J:
+            return "J";
+        case JAL:
+            return "JAL";
+        case BEQ:
+            return "BEQ";
+        case BNE:
+            return "BNE";
+        case BLEZ:
+            return "BLEZ";
+        case BGTZ:
+            return "BGTZ";
+        case JR:
+            return "JR";
+        case JALR:
+            return "JALR";
+        case BLTZAL:
+            return "BLTZAL";
+        case BGEZAL:
+            return "BGEZAL";
+        case COUNT:
+            return "COUNT";
+    }
+}
+
+string getOpcodeString(
+    const variant<PrimaryOps, SecondaryOps, JumpOp> &opcode) {
     if (auto op = get_if<PrimaryOps>(&opcode))
         return getPrimaryOpString(*op);
+    else if (auto op = get_if<SecondaryOps>(&opcode))
+        return getSecondaryOpString(*op);
     else
-        return getSecondaryOps(get<SecondaryOps>(opcode));
+        return getJumpOpString(get<JumpOp>(opcode));
 }
 
 template <>
@@ -885,6 +926,9 @@ struct Cpu {
                 }
 
                 reg.pc += 4;
+                reg.gpr[31] = prevDecoded.newState == State::Linked
+                                  ? reg.pc
+                                  : reg.gpr[31];
 
                 if (auto prevInstr =
                         get_if<LoadDecodedOp>(&prevDecoded.instr)) {
@@ -913,6 +957,7 @@ struct Cpu {
                               : decodeSecondary(opcode);
     }
 
+    // TODO: Standardize argument order.
     DecodedOp decodePrimary(const u32 opcode, const DecodedOp &prevInstr) {
         const u8 primaryOp = uintNoTruncCast<u8>(extractBits(opcode, 26, 6));
         const u8 rd = uintNoTruncCast<u8>(extractBits(opcode, 11, 5));
@@ -924,6 +969,15 @@ struct Cpu {
 
         using enum PrimaryOps;
         switch (static_cast<PrimaryOps>(primaryOp)) {
+            case BCONDZ:
+                return handleJumpOp(static_cast<JumpOp>(rt), opcode);
+            case BEQ:
+            case BNE:
+            case BGTZ:
+            case J:
+            case JAL:
+            case BLEZ:
+                return handleJumpOp(static_cast<JumpOp>(primaryOp), opcode);
             case ADDIU:
                 return {State::NoLoadDelay, reg.pc,
                         WriteDecodedOp{rt, addiu(reg.gpr[rs], imm16)}, ADDIU};
@@ -1002,11 +1056,6 @@ struct Cpu {
             case ORI:
                 return {State::NoLoadDelay, reg.pc,
                         WriteDecodedOp{rt, ori(reg.gpr[rs], imm16)}, ORI};
-            case J:
-                return {.newState = State::NoLoadDelay,
-                        .pc = reg.pc,
-                        .instr = BranchDecodedOp{j(reg.pc, imm26)},
-                        .opcode = J};
             case COP0:
                 return handleCOP0(rs, rt, rd, imm16);
             default:
@@ -1017,6 +1066,57 @@ struct Cpu {
                     opcode, primaryOp,
                     getPrimaryOpString(static_cast<PrimaryOps>(primaryOp)))};
         };
+    }
+
+    DecodedOp handleJumpOp(const JumpOp jumpOp, const u32 opcode) {
+        const u8 rs = uintNoTruncCast<u8>(extractBits(opcode, 21, 5));
+        const u8 rt = uintNoTruncCast<u8>(extractBits(opcode, 16, 5));
+        const u16 imm16 = uintNoTruncCast<u16>(extractBits(opcode, 0, 16));
+        const u32 imm26 = extractBits(opcode, 0, 26);
+        const s32 s = reg.gpr[rs];
+        const s32 t = reg.gpr[rt];
+
+        using enum JumpOp;
+
+        array<bool, static_cast<size_t>(COUNT)> cond;
+        cond[static_cast<size_t>(JAL)] = true;
+        cond[static_cast<size_t>(BEQ)] = (s == t);
+        cond[static_cast<size_t>(BNE)] = (s != t);
+        cond[static_cast<size_t>(BLTZ)] = (s < 0);
+        cond[static_cast<size_t>(BGEZ)] = (s >= 0);
+        cond[static_cast<size_t>(BGTZ)] = (s > 0);
+        cond[static_cast<size_t>(BLEZ)] = (s <= 0);
+
+        switch (jumpOp) {
+            case J:
+                return {.newState = State::NoLoadDelay,
+                        .pc = reg.pc,
+                        .instr = BranchDecodedOp{j(reg.pc, imm26)},
+                        .opcode = jumpOp};
+            case JAL:
+                return {.newState = State::Linked,
+                        .pc = reg.pc,
+                        .instr = BranchDecodedOp{j(reg.pc, imm26)},
+                        .opcode = jumpOp};
+            case JR:
+                return {.newState = State::NoLoadDelay,
+                        .pc = reg.pc,
+                        .instr = BranchDecodedOp{jr(reg.gpr[rs])},
+                        .opcode = jumpOp};
+            case BEQ:
+            case BNE:
+            case BLTZ:
+            case BGEZ:
+            case BGTZ:
+            case BLEZ:
+                return {.newState = State::NoLoadDelay,
+                        .pc = reg.pc,
+                        .instr = BranchDecodedOp{branchCMPHelper(
+                            reg.pc, imm16, cond[static_cast<size_t>(jumpOp)])},
+                        .opcode = jumpOp};
+            default:
+                assert(false);
+        }
     }
 
     DecodedOp handleCOP0(const u32 rs, const u32 rt, const u32 rd,
@@ -1059,6 +1159,9 @@ struct Cpu {
 
         using enum SecondaryOps;
         switch (static_cast<SecondaryOps>(secondaryOp)) {
+            case JR:
+            case JALR:
+                handleJumpOp(static_cast<JumpOp>(secondaryOp), opcode);
             case ADD:
                 return {State::NoLoadDelay, reg.pc,
                         WriteDecodedOp{rd, static_cast<u32>(
@@ -1085,20 +1188,37 @@ struct Cpu {
                         WriteDecodedOp{rd, orInstr(reg.gpr[rs], reg.gpr[rt])},
                         OR};
             default:
-                throw runtime_error{format(
-                    "Invalid opcode/Not implemented Yet: {:032b}, "
-                    "SecondaryOpcode: {:x}, "
-                    "Instruction: {}",
-                    opcode, secondaryOp,
-                    getSecondaryOps(static_cast<SecondaryOps>(secondaryOp)))};
+                throw runtime_error{
+                    format("Invalid opcode/Not implemented Yet: {:032b}, "
+                           "SecondaryOpcode: {:x}, "
+                           "Instruction: {}",
+                           opcode, secondaryOp,
+                           getSecondaryOpString(
+                               static_cast<SecondaryOps>(secondaryOp)))};
         };
     }
 
     u32 orInstr(const u32 s, const u32 t) { return s | t; }
 
+    u32 branchCMPHelper(const u32 currPC, const s16 offset,
+                        bool isBranchTaken) {
+        const u32 delaySlotAddress = (currPC + 4);
+        if (isBranchTaken) {
+            return delaySlotAddress + (offset << 2);
+        } else {
+            return delaySlotAddress;
+        }
+    }
+
+    u32 jr(const u32 s) {
+        if (s % 4 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
+        return s;
+    }
+
     u32 j(const u32 currPC, const u32 imm26) {
         assert(imm26 <= (1 << 26) - 1);
-        return ((currPC + 4) & 0xF0000000) + (imm26 << 2);
+        const u32 delaySlotAddress = currPC + 4;
+        return (delaySlotAddress & 0xF0000000) + (imm26 << 2);
     }
 
     u32 sw(const u32 value, const u32 s, const s16 imm16) {
@@ -1137,7 +1257,7 @@ struct Cpu {
         const u32 src = mmap->load32(VAddress{wordAddr});
         const u32 bitLength = (addr - wordAddr + 1) * 8;
         return {replaceBitRange(dest, 0, src,
-                                static_cast<u32>(bitSize<u32>() - bitLength),
+                                static_cast<u32>(NumOfBits<u32>() - bitLength),
                                 bitLength),
                 addr};
     }
@@ -1149,10 +1269,10 @@ struct Cpu {
         const u32 wordAddr = (addr / 4) * 4;
         const u32 src = mmap->load32(VAddress{wordAddr});
         const u32 bitLength = (addr - wordAddr + 1) * 8;
-        return {
-            replaceBitRange(dest, static_cast<u32>(bitSize<u32>() - bitLength),
-                            src, 0, bitLength),
-            addr};
+        return {replaceBitRange(dest,
+                                static_cast<u32>(NumOfBits<u32>() - bitLength),
+                                src, 0, bitLength),
+                addr};
     }
 
     tuple<u32, u32> lb(const u32 s, const s16 imm16) {
