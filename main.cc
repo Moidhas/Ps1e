@@ -67,22 +67,6 @@ u32 replaceBitRange(const u32 dst, const u32 dstStart, const u32 src,
                          : (dst & dstMask) | ((src & srcMask) << distance);
 }
 
-enum class ExcCode : u32 {
-    Int,      // Interrupt
-    Mod,      // TLB modification, the psx doesn't actually have a TLB.
-    TLBL,     // TLB Load
-    TLBS,     // TLB Store
-    AdEL,     // Address Error on Load or Instruction fetch.
-    AdES,     // Address Error on Store.
-    IBE,      // Instruction Fetch Bus Error
-    DBE,      // Data Load Bus Error
-    Syscall,  // Generated unconditionally by a syscall instruction
-    Bp,       // Breakpoint
-    RI,       // Reserved Instruction
-    CpU,      // Co-Processor unusable
-    Ov        // Arithmetic Overflow
-};
-
 // These contain the insturctions that use the most significant six bits of the
 // opcode to decode. It contains the necesssary bits to decode.
 enum class PrimaryOps : u8 {
@@ -175,13 +159,6 @@ enum class JumpOp : u8 {
     BLTZAL = 0x10,
     BGEZAL = 0x11,
     COUNT
-};
-
-struct MipsException {
-    const ExcCode CAUSE_CODE;
-    const u32 EPC;
-    MipsException(ExcCode CAUSE_CODE, u32 EPC)
-        : CAUSE_CODE{CAUSE_CODE}, EPC{EPC} {}
 };
 
 struct Registers {
@@ -825,10 +802,117 @@ struct formatter<DecodedOp> {
     }
 };
 
+namespace COP0 {
+
+enum class ExcCode : u32 {
+    Int,      // Interrupt
+    Mod,      // TLB modification, the psx doesn't actually have a TLB.
+    TLBL,     // TLB Load
+    TLBS,     // TLB Store
+    AdEL,     // Address Error on Load or Instruction fetch.
+    AdES,     // Address Error on Store.
+    IBE,      // Instruction Fetch Bus Error
+    DBE,      // Data Load Bus Error
+    Syscall,  // Generated unconditionally by a syscall instruction
+    Bp,       // Breakpoint
+    RI,       // Reserved Instruction
+    CpU,      // Co-Processor unusable
+    Ov        // Arithmetic Overflow
+};
+
+union SR {
+    u32 data;
+    // Current Interrupt Enable
+    BitField<0, 1, u32> IEc;
+    // Current Kernel/User Mode
+    BitField<1, 1, u32> KUc;
+    // Previous Interrupt Enable
+    BitField<2, 1, u32> IEp;
+    // Previous Kernel/User Mode
+    BitField<3, 1, u32> KUp;
+    // Old Interrupt Enable
+    BitField<4, 1, u32> IEo;
+    // Old Kernel/User Mode
+    BitField<5, 1, u32> KUo;
+    // interrupt mask fields. When set the corresponding interrupts are allowed
+    // to cause an exception.
+    BitField<8, 8, u32> IM;
+    // Isolate Cache (0=No, 1=Isolate) When isolated, all load and store
+    // operations are targetted to the Data cache, and never the main memory.
+    // (Used by PSX Kernel, in combination with Port FFFE0130h)
+    BitField<16, 1, u32> IsC;
+    // Swapped cache mode (0=Normal, 1=Swapped) Instruction cache will act as
+    // Data cache and vice versa. Use only with Isc to access & invalidate
+    // Instr. cache entries. (Not used by PSX Kernel)
+    BitField<17, 1, u32> SwC;
+    // When set cache parity bits are written as 0.
+    BitField<18, 1, u32> PZ;
+    // Shows the result of the last load operation with the D-cache isolated. It
+    // gets set if the cache really contained data for the addressed memory
+    // location.
+    BitField<19, 1, u32> CM;
+    // Cache parity error (Does not cause exception)
+    BitField<20, 1, u32> PE;
+    // TLB shutdown. Gets set if a programm address simultaneously matches 2 TLB
+    // entries.
+    BitField<21, 1, u32> TS;
+    // BEV Boot exception vectors in RAM/ROM (0=RAM/KSEG0, 1=ROM/KSEG1)
+    BitField<22, 1, u32> BEV;
+    //  Reverse endianness   (0=Normal endianness, 1=Reverse endianness)
+    //  Reverses the byte order in which data is stored in memory. (lo-hi ->
+    //  hi-lo) (Affects only user mode, not kernel mode) (?) (The bit doesn't
+    //  exist in PSX ?)
+    BitField<25, 1, u32> RE;
+    // COP0 Enable (0=Enable only in Kernel Mode, 1=Kernel and User Mode)
+    BitField<28, 1, u32> CU0;
+    // COP1 Enable (0=Disable, 1=Enable) (none in PSX)
+    BitField<29, 1, u32> CU1;
+    // COP2 Enable (0=Disable, 1=Enable) (GTE in PSX)
+    BitField<30, 1, u32> CU2;
+    // COP3 Enable (0=Disable, 1=Enable) (none in PSX)
+    BitField<31, 1, u32> CU3;
+};
+
+union CAUSE {
+    u32 data;
+    // Describes what kind of exception occured
+    BitField<2, 5, u32> ExcCode;
+    // Software Interrupts. Write to these bits to manually cause an exception.
+    // Clear them before returning from the exception handler.
+    BitField<8, 2, u32> Sw;
+    // Interrupt pending field. As long as any of the bits are set they will
+    // cause an interrupt if the corresponding bit is set in IM.
+    BitField<10, 6, u32> IP;
+    // Contains the coprocessor number if the exception occurred because of a
+    // coprocessor instuction for a coprocessor which wasn't enabled in SR.
+    BitField<28, 2, u32> CE;
+    // When BD is set, BT determines whether the branch is taken. The Target
+    // Address Register holds the return address.
+    BitField<30, 1, u32> BT;
+    // Is set when EPC points to the branch instuction instead of the
+    // instruction in the branch delay slot, where the exception occurred.
+    BitField<31, 1, u32> BD;
+};
+
+struct MipsException {
+    const u32 cause;
+    const u32 EPC;
+};
+
 struct COP0 {
     constexpr static u32 BEV = 22;
 
-    array<u32, 16> gpr{};
+    u32 bpc;      // Breakpoint Program Counter
+    u32 bda;      // Breakpoint Data Address
+    u32 tar;      // Target Address
+    u32 dcic;     // Debug and Cache Invalidate Control
+    u32 bada;     // Bad Address
+    u32 bdam;     // Breakpoint Data Address Mask
+    u32 bpcm;     // Breakpoint Program Counter Mask
+    SR sr;        // Status Register
+    CAUSE cause;  // Cause of the last exception
+    u32 epc;      // Exception Program Counter
+    u32 prid;     // Processor Revision Identifier
 
     enum IDX {
         BPC = 3,
@@ -844,50 +928,54 @@ struct COP0 {
         PRID = 15,
     };
 
-    u32 &bpc;    // Breakpoint Program Counter
-    u32 &bda;    // Breakpoint Data Address
-    u32 &tar;    // Target Address
-    u32 &dcic;   // Debug and Cache Invalidate Control
-    u32 &bada;   // Bad Address
-    u32 &bdam;   // Breakpoint Data Address Mask
-    u32 &bpcm;   // Breakpoint Program Counter Mask
-    u32 &sr;     // Status Register
-    u32 &cause;  // Cause of the last exception
-    u32 &epc;    // Exception Program Counter
-    u32 &prid;   // Processor Revision Identifier
+    COP0() { sr.BEV = 1; }
 
-    COP0()
-        : bpc{gpr[BPC]},
-          bda{gpr[BDA]},
-          tar{gpr[TAR]},
-          dcic{gpr[DCIC]},
-          bada{gpr[BadA]},
-          bdam{gpr[BDAM]},
-          bpcm{gpr[BPCM]},
-          sr{gpr[SR]},
-          cause{gpr[CAUSE]},
-          epc{gpr[EPC]},
-          prid{gpr[PRID]} {
-        sr |= (1 << BEV);
+    u32 &operator[](const u32 idx) {
+        switch (idx) {
+            case BPC:
+                return bpc;
+            case BDA:
+                return bda;
+            case TAR:
+                return tar;
+            case DCIC:
+                return dcic;
+            case BadA:
+                return bada;
+            case BDAM:
+                return bdam;
+            case BPCM:
+                return bpcm;
+            case SR:
+                return sr.data;
+            case CAUSE:
+                return cause.data;
+            case EPC:
+                return epc;
+            case PRID:
+                return prid;
+            default:
+                assert(false);
+        }
     }
 
     u32 srStackPush(bool isKernalMode, bool isInterruptEnabled) {
         u32 protectionBitsMask = (isKernalMode << 1) | isInterruptEnabled;
 
-        u32 srStack = 0b1111 & sr;
+        u32 srStack = 0b1111 & sr.data;
         srStack = (srStack << 2) | protectionBitsMask;
-        return (sr & 0b000000) | srStack;
+        return (sr.data & 0b000000) | srStack;
     }
 
-    u32 srStackPop() { return replaceBitRange(sr, 0, sr, 2, 4); }
+    u32 srStackPop() { return replaceBitRange(sr.data, 0, sr.data, 2, 4); }
 };
+}  // namespace COP0
 
-// TODO: rewrite.
 struct Cpu {
     constexpr static u32 RESET_VECTOR = 0xBFC00000;
     const DecodedOp ZERO_INSTR;
     Registers reg;
-    COP0 cop0;
+    COP0::COP0 cop0;
     MMap *mmap;
 
     Cpu()
@@ -940,12 +1028,12 @@ struct Cpu {
 
                 prevDecoded = decodedOp;
                 reg.gpr[0] = 0;
-            } catch (const MipsException &e) {
+            } catch (const COP0::MipsException &e) {
                 cop0.epc = e.EPC;
-                cop0.sr = cop0.srStackPush(true, false);
-                cop0.cause = extractBits(to_underlying(e.CAUSE_CODE), 2, 5);
-                reg.pc =
-                    extractBits(cop0.sr, cop0.BEV, 1) ? 0xbfc00180 : 0x80000080;
+                cop0.sr.data = cop0.srStackPush(true, false);
+                cop0.cause.data = e.cause;
+                reg.pc = cop0.sr.BEV ? 0xbfc00180 : 0x80000080;
+                prevDecoded = ZERO_INSTR;
             }
         }
     }
@@ -1125,20 +1213,19 @@ struct Cpu {
 
         switch (rs) {
             case MFC0:
-                assert(rd < cop0.gpr.size());
                 return {.newState = State::LoadDelay,
                         .pc = reg.pc,
-                        .instr = LoadDecodedOp{rt, cop0.gpr[rd], rd},
+                        .instr = LoadDecodedOp{rt, cop0[rd], rd},
                         .opcode = PrimaryOps::COP0};
             case MTC0: {
-                cop0.gpr[rd] = reg.gpr[rt];
+                cop0[rd] = reg.gpr[rt];
                 return {.newState = State::NoLoadDelay,
                         .pc = reg.pc,
                         .instr = StoreDecodedOp{reg.gpr[rt], rd},
                         .opcode = PrimaryOps::COP0};
             }
             case RFE:
-                cop0.sr = cop0.srStackPop();
+                cop0.sr.data = cop0.srStackPop();
                 return {.newState = State::NoLoadDelay,
                         .pc = reg.pc,
                         .instr = WriteDecodedOp{0, 0},
@@ -1211,7 +1298,8 @@ struct Cpu {
     }
 
     u32 jr(const u32 s) {
-        if (s % 4 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
+        // if (s % 4 != 0) throw COP0::MipsException{COP0::ExcCode::AdEL,
+        // reg.pc};
         return s;
     }
 
@@ -1223,14 +1311,16 @@ struct Cpu {
 
     u32 sw(const u32 value, const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
-        if (addr % 4 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
+        // if (addr % 4 != 0)
+        //     throw COP0::MipsException{COP0::ExcCode::AdEL, reg.pc};
         mmap->store32(VAddress{addr}, value);
         return addr;
     }
 
     u32 sh(const u32 value, const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
-        if (addr % 2 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
+        // if (addr % 2 != 0)
+        //     throw COP0::MipsException{COP0::ExcCode::AdEL, reg.pc};
         mmap->store16(VAddress{addr}, value);
         return addr;
     }
@@ -1287,25 +1377,30 @@ struct Cpu {
     // implicit sign-extension, this does not work in 1's complement.
     tuple<u32, u32> lh(const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
-        if (addr % 2 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
+        // if (addr % 2 != 0)
+        //     throw COP0::MipsException{COP0::ExcCode::AdEL, reg.pc};
         return {static_cast<s16>(mmap->load16(VAddress{s + imm16})), addr};
     }
 
     tuple<u32, u32> lhu(const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
-        if (addr % 2 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
+        // if (addr % 2 != 0)
+        //     throw COP0::MipsException{COP0::ExcCode::AdEL, reg.pc};
         return {mmap->load16(VAddress{addr}), addr};
     }
 
     tuple<u32, u32> lw(const u32 s, const s16 imm16) {
         const u32 addr = s + imm16;
-        if (addr % 4 != 0) throw MipsException{ExcCode::AdEL, reg.pc};
+        // if (addr % 4 != 0)
+        //     throw COP0::MipsException{COP0::ExcCode::AdEL, reg.pc};
         return {mmap->load32(VAddress{s + imm16}), addr};
     }
 
     s32 addi(const s32 s, const s16 imm16) {
         if ((s > 0 && imm16 > INT_MAX - s) || (s < 0 && imm16 < INT_MIN - s)) {
-            throw MipsException{ExcCode::Ov, reg.pc};
+            COP0::CAUSE cause{.data = 0};
+            cause.ExcCode = static_cast<u32>(COP0::ExcCode::Ov);
+            throw COP0::MipsException{cause.data, reg.pc};
         }
 
         return s + imm16;
@@ -1317,7 +1412,9 @@ struct Cpu {
 
     s32 add(const s32 s, const s32 t) {
         if ((s > 0 && t > INT_MAX - s) || (s < 0 && t < INT_MIN - s)) {
-            throw MipsException{ExcCode::Ov, reg.pc};
+            COP0::CAUSE cause{.data = 0};
+            cause.ExcCode = static_cast<u32>(COP0::ExcCode::Ov);
+            throw COP0::MipsException{cause.data, reg.pc};
         }
 
         return s + t;
@@ -1327,7 +1424,9 @@ struct Cpu {
 
     s32 sub(const s32 s, const s32 t) {
         if ((t > 0 && s < INT_MIN + t) || (t < 0 && s > INT_MAX + t)) {
-            throw MipsException{ExcCode::Ov, reg.pc};
+            COP0::CAUSE cause{.data = 0};
+            cause.ExcCode = static_cast<u32>(COP0::ExcCode::Ov);
+            throw COP0::MipsException{cause.data, reg.pc};
         }
 
         return s - t;

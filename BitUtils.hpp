@@ -26,6 +26,7 @@ template <unsigned Index, unsigned Count, std::unsigned_integral Type>
 struct BitField {
     Type data;
 
+    static_assert(Count > 0);
     static_assert(Index + Count - 1 < NumOfBits<Type>());
 
     constexpr Type GetMask() const {

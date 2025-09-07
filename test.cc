@@ -40,6 +40,7 @@ void testBitField() {
         BitField<5, 5, u32> x;
     };
 
+
     data = 0b0000000001111100000;
     assert(x == 0b11111);
     x &= 0;
