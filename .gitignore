@@ -1,5 +1,6 @@
 *.BIN
 BIOS/*
 ps1
-ps1.dSYM/*
+*.dSYM/*
 amidog/*
+test
