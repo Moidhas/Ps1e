@@ -12,8 +12,8 @@
 #include <fstream>
 #include <iostream>
 #include <print>
+#include <span>
 #include <stdexcept>
-#include <utility>
 #include <variant>
 
 #include "BitUtils.hpp"
@@ -227,9 +227,12 @@ struct MemCtrl1DelayReg {
 
 template <typename T>
 struct AddressedValue {
-    Range range;
     T value;
-    AddressedValue(Range &&range) : range{range} {}
+    Range range;
+
+    AddressedValue(const T &value, const Range &range)
+        : value{value}, range{range} {}
+    AddressedValue(const Range &range) : range{range} {}
 };
 
 struct VAddress {
@@ -271,10 +274,10 @@ class MMap {
     AddressedValue<array<MemCtrl1DelayReg, 6>> memCtrl1DelayRegs{
         Range{0x1F801008, 6 * 4}};
 
-    AddressedValue<u32> e1BaseAddr{Range{0x1F801000, 1}};
-    AddressedValue<u32> e2BaseAddr{Range{0x1F801004, 1}};
+    AddressedValue<u32> e1BaseAddr{0, Range{0x1F801000, 1}};
+    AddressedValue<u32> e2BaseAddr{0, Range{0x1F801004, 1}};
 
-    AddressedValue<u32> ramSize{{0x1F801060, 4}};
+    AddressedValue<u32> ramSize{0, Range{0x1F801060, 4}};
 
     // TODO: change since, not actually buffer.
     Range E2_RANGE{0x1F802000, 8 * KB};
@@ -284,9 +287,9 @@ class MMap {
     Range E3_RANGE{0x1FA00000, 2 * MB};
     // array<u8, 0> e3Buffer;
 
-    AddressedValue<array<u8, 512 * KB>> biosBuffer{{0x1FC00000, 512 * KB}};
-    AddressedValue<u32> cacheCtrlReg{Range{0xFFFE0130, 4}};
-    AddressedValue<u32> comDelay{Range{0x1F801020, 4}};
+    AddressedValue<array<u8, 512 * KB>> biosBuffer{Range{0x1FC00000, 512 * KB}};
+    AddressedValue<u32> cacheCtrlReg{0, Range{0xFFFE0130, 4}};
+    AddressedValue<u32> comDelay{0, Range{0x1F801020, 4}};
 
     // TODO: make it so that this is somehow with resepct to the addresses.
     enum class DelayIdx {
@@ -421,13 +424,27 @@ class MMap {
             assert(false);
     }
 
+    u32 handlBufferRead(AddressedValue<span<u8>> addressedBuffer,
+                        const PAddress paddr, const u8 numOfBytes) {
+        const u32 addr = paddr.m_addr;
+        const u32 idx = biosBuffer.range.getOffset(addr);
+        assert(addressedBuffer.value.size() >= idx + numOfBytes);
+        u32 accBytes{0};
+        for (int i = 0; i < numOfBytes; ++i) {
+            accBytes |=
+                static_cast<u32>(addressedBuffer.value[idx + i] << (8 * i));
+        }
+        return accBytes;
+    }
+
     u32 handleRead(const PAddress paddr, const u8 numOfBytes) {
         assert(numOfBytes <= 4);
         const u32 addr = paddr.m_addr;
 
         if (ramBuffer.range.contains(addr)) {
             println("RAM");
-            assert(false);
+            return handlBufferRead({span{ramBuffer.value}, ramBuffer.range},
+                                   paddr, numOfBytes);
         } else if (E1_RANGE.contains(addr)) {
             println("E1");
             assert(false);
@@ -444,14 +461,8 @@ class MMap {
             println("E3_RANGE");
             assert(false);
         } else if (biosBuffer.range.contains(addr)) {
-            const u32 idx = biosBuffer.range.getOffset(addr);
-            assert(biosBuffer.value.size() >= idx + numOfBytes);
-            u32 accBytes{0};
-            for (int i = 0; i < numOfBytes; ++i) {
-                accBytes |=
-                    static_cast<u32>(biosBuffer.value[idx + i] << (8 * i));
-            }
-            return accBytes;
+            return handlBufferRead({span{biosBuffer.value}, biosBuffer.range},
+                                   paddr, numOfBytes);
         } else if (cacheCtrlReg.range.contains(addr)) {
             println("CacheCtrl");
             return cacheCtrlReg.value;
