@@ -4,13 +4,13 @@
 #include <bitset>
 #include <cassert>
 #include <climits>
-#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <print>
 #include <span>
 #include <stdexcept>
@@ -33,39 +33,6 @@ using u64 = uint64_t;
 constexpr u32 KB = (1 << 10);
 constexpr u32 MB = (1 << 20);
 constexpr u32 GB = (1 << 30);
-
-template <unsigned_integral T, unsigned_integral U>
-constexpr T uintNoTruncCast(const U x) noexcept {
-    assert(NumLimit<T>() >= x);
-    return static_cast<T>(x);
-}
-
-// shifts the extractedBits to least significant end.
-u32 extractBits(u32 bits, u32 start, u32 length) {
-    constexpr u32 end = sizeof(bits) * 8 - 1;
-    assert(end >= start && start + length - 1 <= end);
-
-    u32 shifted = bits >> start;
-    u32 mask = static_cast<u64>(1 << length) - 1;
-
-    assert((shifted & mask) <= static_cast<u64>(1 << length) - 1);
-    return shifted & mask;
-}
-
-// replaces the bits in dst with the bits in src acorrding to the bitRange.
-u32 replaceBitRange(const u32 dst, const u32 dstStart, const u32 src,
-                    const u32 srcStart, const u32 length) {
-    static_assert(sizeof(dst) == sizeof(src));
-    assert(NumOfBits<u32>() >= length + dstStart);
-    assert(NumOfBits<u32>() >= length + srcStart);
-    const u32 lengthOfOnes = (1 << length) - 1;
-    const u32 dstMask = ~(lengthOfOnes << dstStart);
-    const u32 srcMask = lengthOfOnes << srcStart;
-    const s32 distance = dstStart - srcStart;
-
-    return distance <= 0 ? (dst & dstMask) | ((src & srcMask) >> -distance)
-                         : (dst & dstMask) | ((src & srcMask) << distance);
-}
 
 // These contain the insturctions that use the most significant six bits of the
 // opcode to decode. It contains the necesssary bits to decode.
@@ -239,7 +206,7 @@ struct PAddress {
 // TODO: Change the code so that if ranges get changed by bios, the addresses
 // are some sort of not_initliazed value.
 // TODO: Implement caching.
-class MMap {
+struct MMap {
     // User Memory: KUSEG is intended to contain 2GB virtual memory (on extended
     // MIPS processors), the PSX doesn't support virtual memory, and KUSEG
     // simply contains a mirror of KSEG0/KSEG1 (in the first 512MB) (trying to
@@ -249,6 +216,7 @@ class MMap {
     static constexpr Range KSEG0_RANGE{0x80000000, 512 * MB};
     static constexpr Range KSEG1_RANGE{0xA0000000, 512 * MB};
     static constexpr Range KSEG2_RANGE{0xC0000000, GB};
+    static constexpr Range EXCEPTION_HANDLER{0x00000080, 0x10};
 
     AddressedValue<array<u8, 2 * MB>> ramBuffer{
         Range{0x00000000, 2 * MB, 2 * MB - 1}};
@@ -394,15 +362,15 @@ class MMap {
         return paddr;
     }
 
-    u32 handlBufferRead(const AddressedValue<span<u8>> &addressedBuffer,
+    u32 handleBufferRead(const AddressedValue<span<u8>> &addressedBuffer,
                         const PAddress paddr, const u8 numOfBytes) {
         const u32 addr = paddr.m_addr;
         const u32 idx = addressedBuffer.range.getOffset(addr);
         assert(addressedBuffer.value.size() >= idx + numOfBytes);
         u32 accBytes{0};
         for (int i = 0; i < numOfBytes; ++i) {
-            accBytes |=
-                static_cast<u32>(addressedBuffer.value[idx + i] << (8 * i));
+            const u32 byte = addressedBuffer.value[idx + i] << (8 * i);
+            accBytes |= byte;
         }
         return accBytes;
     }
@@ -412,7 +380,8 @@ class MMap {
         const u32 addr = paddr.m_addr;
 
         if (ramBuffer.range.contains(addr)) {
-            return handlBufferRead({span{ramBuffer.value}, ramBuffer.range},
+            println("RAM READ: [{:#X}]  numOfBytes: {}", addr, numOfBytes);
+            return handleBufferRead({span{ramBuffer.value}, ramBuffer.range},
                                    paddr, numOfBytes);
         } else if (E1_RANGE.contains(addr)) {
             // println("E1");
@@ -430,13 +399,13 @@ class MMap {
             // println("E3_RANGE");
             assert(false);
         } else if (biosBuffer.range.contains(addr)) {
-            return handlBufferRead({span{biosBuffer.value}, biosBuffer.range},
+            return handleBufferRead({span{biosBuffer.value}, biosBuffer.range},
                                    paddr, numOfBytes);
         } else if (cacheCtrlReg.range.contains(addr)) {
             // println("CacheCtrl");
             return cacheCtrlReg.value;
         } else {
-            // println("{}", addr);
+            println("{:#X}", addr);
             assert(false);
         }
     }
@@ -448,7 +417,8 @@ class MMap {
         const u32 idx = addressedBuffer.range.getOffset(addr);
         assert(addressedBuffer.value.size() >= idx + numOfBytes);
         for (int i = 0; i < numOfBytes; ++i) {
-            addressedBuffer.value[idx + i] = value & (0xFF << (8 * i));
+            const u8 byte = (value & (0xFF << (8 * i))) >> (8 * i);
+            addressedBuffer.value[idx + i] = byte;
         }
     }
 
@@ -458,6 +428,8 @@ class MMap {
         const u32 addr = paddr.m_addr;
 
         if (ramBuffer.range.contains(addr)) {
+            println("RAM WRITE: [{:#X}] = {:0b}, numOfBytes: {}", addr, value,
+                    numOfBytes);
             handleBufferWrite({span{ramBuffer.value}, ramBuffer.range}, paddr,
                               numOfBytes, value);
         } else if (E1_RANGE.contains(addr)) {
@@ -483,7 +455,6 @@ class MMap {
         }
     }
 
-   public:
     MMap() {
         struct stat info;
         stat("./BIOS/SCPH1001.BIN", &info);
@@ -503,14 +474,14 @@ class MMap {
     u16 load16(VAddress vAddr) {
         const PAddress paddr = getPAddr(vAddr);
         const u32 value = handleRead(paddr, 2);
-        assert(value <= NumOfBits<u16>());
+        assert(value <= NumLimit<u16>());
         return value;
     }
 
     u8 load8(VAddress vAddr) {
         const PAddress paddr = getPAddr(vAddr);
         const u32 value = handleRead(paddr, 1);
-        assert(value <= NumOfBits<u8>());
+        assert(value <= NumLimit<u8>());
         return value;
     }
 
@@ -552,11 +523,12 @@ struct WriteDecodedOp {
 };
 
 struct BranchDecodedOp {
-    u32 pc;
+    optional<u32> pc;
 };
 
 struct StoreDecodedOp {
     u32 value;
+    u32 srcRegId;
     u32 dstAddr;
 };
 
@@ -748,7 +720,7 @@ string getJumpOpString(JumpOp opcode) {
         case BGEZAL:
             return "BGEZAL";
         case COUNT:
-            return "COUNT";
+            assert(false);
     }
 }
 
@@ -777,12 +749,16 @@ struct formatter<DecodedOp> {
                              decodedOp.pc, opcodeString, instr->dstRegId,
                              instr->addr, instr->value);
         } else if (auto instr = get_if<StoreDecodedOp>(&decodedOp.instr)) {
-            return format_to(ctx.out(), "PC:0x{:X}  {}: [0x{:X}]=0x{:X}",
+            return format_to(ctx.out(), "PC:{:#X}  {}: [{:#X}]=${}={:#X}",
                              decodedOp.pc, opcodeString, instr->dstAddr,
-                             instr->value);
+                             instr->srcRegId, instr->value);
         } else if (auto instr = get_if<BranchDecodedOp>(&decodedOp.instr)) {
-            return format_to(ctx.out(), "PC:0x{:X} {}: $PC=0x{:X}",
-                             decodedOp.pc, opcodeString, instr->pc);
+            if (instr->pc.has_value())
+                return format_to(ctx.out(), "PC:{:#X} {}: $PC={:#X}",
+                                 decodedOp.pc, opcodeString, instr->pc.value());
+
+            return format_to(ctx.out(), "PC:{:#X} {}: Branch is not taken",
+                             decodedOp.pc, opcodeString);
         } else {
             assert(false);
         }
@@ -915,7 +891,7 @@ struct COP0 {
         PRID = 15,
     };
 
-    COP0() { sr.BEV = 1; }
+    // COP0() { sr.BEV = 1; }
 
     u32 &operator[](const u32 idx) {
         switch (idx) {
@@ -993,7 +969,15 @@ struct Cpu {
     }
     ~Cpu() { delete mmap; }
 
+    bool containedWithinException(const u32 addr) {
+        return mmap->EXCEPTION_HANDLER.contains(
+            mmap->getPAddr(VAddress{addr}).m_addr);
+    }
+
     // This is where all side effects should be.
+    // THIS NEEDS A MASSIVE REWRITE THERE IS PROBLEMS WITH THE FACT THAT THE
+    // LINKED INSTRUCTION IS BOTH A WRTIE TO REGISTER ($31) INSTR AND A PC
+    // UPDATE.
     void runCpuLoop() {
         DecodedOp prevDecoded{ZERO_INSTR};
 
@@ -1002,7 +986,7 @@ struct Cpu {
                 Kernel::putc(reg);
                 u32 opcode = mmap->load32(VAddress{reg.pc});
                 DecodedOp decodedOp = decode(opcode, prevDecoded);
-                // println("{}", decodedOp);
+                println("{}", decodedOp);
 
                 // TODO: unless an IRQ occurs between the load and
                 // next opcode, in that case the load would complete during IRQ
@@ -1013,32 +997,36 @@ struct Cpu {
                                get_if<WriteDecodedOp>(&decodedOp.instr)) {
                     assert(instr->dstRegId < reg.gpr.size());
                     reg.gpr[instr->dstRegId] = instr->value;
-
-                    if (auto prevInstr =
-                            get_if<LoadDecodedOp>(&prevDecoded.instr);
-                        prevInstr && prevInstr->dstRegId == instr->dstRegId) {
-                        prevDecoded.newState = State::OverWritten;
-                    }
                 }
 
+                reg.gpr[31] = decodedOp.newState == State::Linked ? reg.pc + 8
+                                                                  : reg.gpr[31];
                 reg.pc += 4;
-                reg.gpr[31] = prevDecoded.newState == State::Linked
-                                  ? reg.pc
-                                  : reg.gpr[31];
-
                 if (auto prevInstr =
                         get_if<LoadDecodedOp>(&prevDecoded.instr)) {
-                    reg.gpr[prevInstr->dstRegId] = prevInstr->value;
+                    u32 regId = prevInstr->dstRegId;
+                    u32 value = prevInstr->value;
+
+                    if (auto instr = get_if<WriteDecodedOp>(&decodedOp.instr);
+                        instr && prevInstr->dstRegId == instr->dstRegId) {
+                        regId = 0;
+                        value = 0;
+                    } else if (decodedOp.newState == State::Linked &&
+                               prevInstr->dstRegId == 31) {
+                        regId = 0;
+                        value = 0;
+                    }
+
+                    reg.gpr[regId] = value;
                 } else if (auto prevInstr =
                                get_if<BranchDecodedOp>(&prevDecoded.instr)) {
-                    reg.pc = prevInstr->pc;
+                    reg.pc = prevInstr->pc.value_or(reg.pc);
                 }
 
                 prevDecoded = decodedOp;
                 reg.gpr[0] = 0;
             } catch (const COP0::MipsException &e) {
                 handleMipsException(e);
-                prevDecoded = ZERO_INSTR;
             }
         }
     }
@@ -1053,20 +1041,19 @@ struct Cpu {
     }
 
     DecodedOp decode(const u32 opcode, const DecodedOp &prevInstr) {
-        const u8 primaryOp = uintNoTruncCast<u8>(extractBits(opcode, 26, 6));
+        const u8 primaryOp = extractBits(opcode, 26, 6);
 
         return primaryOp != 0 ? decodePrimary(opcode, prevInstr)
                               : decodeSecondary(opcode);
     }
 
-    // TODO: Standardize argument order.
     DecodedOp decodePrimary(const u32 opcode, const DecodedOp &prevInstr) {
-        const u8 primaryOp = uintNoTruncCast<u8>(extractBits(opcode, 26, 6));
-        const u8 rd = uintNoTruncCast<u8>(extractBits(opcode, 11, 5));
-        const u8 rs = uintNoTruncCast<u8>(extractBits(opcode, 21, 5));
-        const u8 rt = uintNoTruncCast<u8>(extractBits(opcode, 16, 5));
-        const u8 imm5 = uintNoTruncCast<u8>(extractBits(opcode, 6, 5));
-        const u16 imm16 = uintNoTruncCast<u16>(extractBits(opcode, 0, 16));
+        const u8 primaryOp = extractBits(opcode, 26, 6);
+        const u8 rd = extractBits(opcode, 11, 5);
+        const u8 rs = extractBits(opcode, 21, 5);
+        const u8 rt = extractBits(opcode, 16, 5);
+        const u8 imm5 = extractBits(opcode, 6, 5);
+        const u16 imm16 = extractBits(opcode, 0, 16);
         const u32 imm26 = extractBits(opcode, 0, 26);
 
         using enum PrimaryOps;
@@ -1081,6 +1068,8 @@ struct Cpu {
             case BLEZ:
                 return handleJumpOp(static_cast<JumpOp>(primaryOp), opcode);
             case ADDIU:
+                println("-- ${:#X}=${:#X}({:#X}) + {:#X}", rt, rs, reg.gpr[rs],
+                        imm16);
                 return {State::NoLoadDelay, reg.pc,
                         WriteDecodedOp{rt, addiu(reg.gpr[rs], imm16)}, ADDIU};
             case ADDI:
@@ -1139,18 +1128,24 @@ struct Cpu {
                 }
             case SW:
                 return {State::NoLoadDelay, reg.pc,
-                        StoreDecodedOp{reg.gpr[rt],
-                                       sw(reg.gpr[rt], reg.gpr[rs], imm16)},
+                        StoreDecodedOp{
+                            .value = reg.gpr[rt],
+                            .srcRegId = rt,
+                            .dstAddr = sw(reg.gpr[rt], reg.gpr[rs], imm16)},
                         SW};
             case SH:
                 return {State::NoLoadDelay, reg.pc,
-                        StoreDecodedOp{reg.gpr[rt],
-                                       sh(reg.gpr[rt], reg.gpr[rs], imm16)},
+                        StoreDecodedOp{
+                            .value = reg.gpr[rt],
+                            .srcRegId = rt,
+                            .dstAddr = sh(reg.gpr[rt], reg.gpr[rs], imm16)},
                         SH};
             case SB:
                 return {State::NoLoadDelay, reg.pc,
-                        StoreDecodedOp{reg.gpr[rt],
-                                       sb(reg.gpr[rt], reg.gpr[rs], imm16)},
+                        StoreDecodedOp{
+                            .value = reg.gpr[rt],
+                            .srcRegId = rt,
+                            .dstAddr = sb(reg.gpr[rt], reg.gpr[rs], imm16)},
                         SB};
             case LUI:
                 return {State::NoLoadDelay, reg.pc,
@@ -1178,9 +1173,9 @@ struct Cpu {
     }
 
     DecodedOp handleJumpOp(const JumpOp jumpOp, const u32 opcode) {
-        const u8 rs = uintNoTruncCast<u8>(extractBits(opcode, 21, 5));
-        const u8 rt = uintNoTruncCast<u8>(extractBits(opcode, 16, 5));
-        const u16 imm16 = uintNoTruncCast<u16>(extractBits(opcode, 0, 16));
+        const u8 rs = extractBits(opcode, 21, 5);
+        const u8 rt = extractBits(opcode, 16, 5);
+        const u16 imm16 = extractBits(opcode, 0, 16);
         const u32 imm26 = extractBits(opcode, 0, 26);
         const s32 s = reg.gpr[rs];
         const s32 t = reg.gpr[rt];
@@ -1197,6 +1192,9 @@ struct Cpu {
         cond[static_cast<size_t>(BLEZ)] = (s <= 0);
 
         switch (jumpOp) {
+            case JALR:
+                assert(false && "DO NOT IMPLEMENT THIS UNTIL REWRITE");
+                break;
             case J:
                 return {.newState = State::NoLoadDelay,
                         .pc = reg.pc,
@@ -1218,12 +1216,18 @@ struct Cpu {
             case BGEZ:
             case BGTZ:
             case BLEZ:
+                println("-- BranchCMP ${}={:#X} ${}={:#X}", rs, s, rt, t);
                 return {.newState = State::NoLoadDelay,
                         .pc = reg.pc,
-                        .instr = BranchDecodedOp{branchCMPHelper(
-                            reg.pc, imm16, cond[static_cast<size_t>(jumpOp)])},
+                        .instr =
+                            BranchDecodedOp{
+                                .pc = branchCMPHelper(
+                                    reg.pc, imm16,
+                                    cond[static_cast<size_t>(jumpOp)]),
+                            },
                         .opcode = jumpOp};
             default:
+                println("{}", getJumpOpString(jumpOp));
                 assert(false);
         }
     }
@@ -1234,15 +1238,19 @@ struct Cpu {
 
         switch (rs) {
             case MFC0:
+                println("--MFC0");
                 return {.newState = State::LoadDelay,
                         .pc = reg.pc,
                         .instr = LoadDecodedOp{rt, cop0[rd], rd},
                         .opcode = PrimaryOps::COP0};
             case MTC0: {
+                println("--MTC0");
                 cop0[rd] = reg.gpr[rt];
                 return {.newState = State::NoLoadDelay,
                         .pc = reg.pc,
-                        .instr = StoreDecodedOp{reg.gpr[rt], rd},
+                        .instr = StoreDecodedOp{.value = reg.gpr[rt],
+                                                .srcRegId = rt,
+                                                .dstAddr = rd},
                         .opcode = PrimaryOps::COP0};
             }
             // case RFE:
@@ -1257,20 +1265,19 @@ struct Cpu {
     }
 
     DecodedOp decodeSecondary(const u32 opcode) {
-        const u8 secondaryOp = uintNoTruncCast<u8>(extractBits(opcode, 0, 6));
-        const u8 rd = uintNoTruncCast<u8>(extractBits(opcode, 11, 5));
-        const u8 rs = uintNoTruncCast<u8>(extractBits(opcode, 21, 5));
-        const u8 rt = uintNoTruncCast<u8>(extractBits(opcode, 16, 5));
-        const u8 imm5 = uintNoTruncCast<u8>(extractBits(opcode, 6, 5));
-        const u16 imm16 = uintNoTruncCast<u16>(extractBits(opcode, 0, 16));
-        const u32 imm26 = extractBits(opcode, 0, 26);
-        const u32 code = extractBits(opcode, 6, 20);
+        const u8 secondaryOp = extractBits(opcode, 0, 6);
+        const u8 rd = extractBits(opcode, 11, 5);
+        const u8 rs = extractBits(opcode, 21, 5);
+        const u8 rt = extractBits(opcode, 16, 5);
+        const u8 imm5 = extractBits(opcode, 6, 5);
 
         using enum SecondaryOps;
         switch (static_cast<SecondaryOps>(secondaryOp)) {
-            case JR:
             case JALR:
-                handleJumpOp(static_cast<JumpOp>(secondaryOp), opcode);
+                assert(false);
+                break;
+            case JR:
+                return handleJumpOp(static_cast<JumpOp>(secondaryOp), opcode);
             case AND:
                 return {.newState = State::NoLoadDelay,
                         .pc = reg.pc,
@@ -1319,6 +1326,7 @@ struct Cpu {
                         .opcode = SLTU};
             case SYSCALL:
                 syscall();
+                break;
             default:
                 throw runtime_error{
                     format("Invalid opcode/Not implemented Yet: {:032b}, "
@@ -1349,14 +1357,13 @@ struct Cpu {
 
     u32 orInstr(const u32 s, const u32 t) { return s | t; }
 
-    u32 branchCMPHelper(const u32 currPC, const s16 offset,
-                        bool isBranchTaken) {
+    optional<u32> branchCMPHelper(const u32 currPC, const s16 offset,
+                                  const bool isBranchTaken) {
         const u32 delaySlotAddress = (currPC + 4);
-        if (isBranchTaken) {
-            return delaySlotAddress + (offset << 2);
-        } else {
-            return delaySlotAddress;
-        }
+        if (isBranchTaken)
+            return delaySlotAddress + (static_cast<s32>(offset) << 2);
+
+        return {};
     }
 
     u32 jr(const u32 s) {
@@ -1368,7 +1375,7 @@ struct Cpu {
     u32 j(const u32 currPC, const u32 imm26) {
         assert(imm26 <= (1 << 26) - 1);
         const u32 delaySlotAddress = currPC + 4;
-        return (delaySlotAddress & 0xF0000000) + (imm26 << 2);
+        return (delaySlotAddress & 0xF0000000) | (imm26 << 2);
     }
 
     u32 sw(const u32 value, const u32 s, const s16 imm16) {
