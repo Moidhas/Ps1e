@@ -380,12 +380,12 @@ struct MMap {
         const u32 addr = paddr.m_addr;
 
         if (ramBuffer.range.contains(addr)) {
-            println("RAM READ: [{:#X}]  numOfBytes: {}", addr, numOfBytes);
             return handleBufferRead({span{ramBuffer.value}, ramBuffer.range},
                                    paddr, numOfBytes);
         } else if (E1_RANGE.contains(addr)) {
-            // println("E1");
-            assert(false);
+            println("E1");
+            // assert(false);
+            return 0;
         } else if (SCRATCHPAD_RANGE.contains(addr)) {
             // println("SCRATCHPAD_RANGE");
             assert(false);
@@ -428,8 +428,6 @@ struct MMap {
         const u32 addr = paddr.m_addr;
 
         if (ramBuffer.range.contains(addr)) {
-            println("RAM WRITE: [{:#X}] = {:0b}, numOfBytes: {}", addr, value,
-                    numOfBytes);
             handleBufferWrite({span{ramBuffer.value}, ramBuffer.range}, paddr,
                               numOfBytes, value);
         } else if (E1_RANGE.contains(addr)) {
@@ -1253,12 +1251,13 @@ struct Cpu {
                                                 .dstAddr = rd},
                         .opcode = PrimaryOps::COP0};
             }
-            // case RFE:
-            //     cop0.sr.data = cop0.srStackPop();
-            //     return {.newState = State::NoLoadDelay,
-            //             .pc = reg.pc,
-            //             .instr = WriteDecodedOp{0, 0},
-            //             .opcode = PrimaryOps::COP0};
+            case RFE:
+                assert(false && "RFE");
+                cop0.sr.data = cop0.srStackPop();
+                return {.newState = State::NoLoadDelay,
+                        .pc = reg.pc,
+                        .instr = WriteDecodedOp{0, 0},
+                        .opcode = PrimaryOps::COP0};
             default:
                 assert(false);
         }
