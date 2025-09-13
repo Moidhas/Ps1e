@@ -363,7 +363,7 @@ struct MMap {
     }
 
     u32 handleBufferRead(const AddressedValue<span<u8>> &addressedBuffer,
-                        const PAddress paddr, const u8 numOfBytes) {
+                         const PAddress paddr, const u8 numOfBytes) {
         const u32 addr = paddr.m_addr;
         const u32 idx = addressedBuffer.range.getOffset(addr);
         assert(addressedBuffer.value.size() >= idx + numOfBytes);
@@ -381,7 +381,7 @@ struct MMap {
 
         if (ramBuffer.range.contains(addr)) {
             return handleBufferRead({span{ramBuffer.value}, ramBuffer.range},
-                                   paddr, numOfBytes);
+                                    paddr, numOfBytes);
         } else if (E1_RANGE.contains(addr)) {
             println("E1");
             // assert(false);
@@ -400,7 +400,7 @@ struct MMap {
             assert(false);
         } else if (biosBuffer.range.contains(addr)) {
             return handleBufferRead({span{biosBuffer.value}, biosBuffer.range},
-                                   paddr, numOfBytes);
+                                    paddr, numOfBytes);
         } else if (cacheCtrlReg.range.contains(addr)) {
             // println("CacheCtrl");
             return cacheCtrlReg.value;
@@ -499,6 +499,8 @@ struct MMap {
     }
 };
 
+namespace Opcode {
+
 enum class State {
     NoLoadDelay,
     SpecialLoadDelay,
@@ -528,6 +530,13 @@ struct StoreDecodedOp {
     u32 value;
     u32 srcRegId;
     u32 dstAddr;
+};
+
+struct Opcode {
+    u32 pc;
+    array<u32, 2> src;
+    array<u32, 2> dst;
+    bool delay;
 };
 
 struct DecodedOp {
@@ -732,25 +741,27 @@ string getOpcodeString(
         return getJumpOpString(get<JumpOp>(opcode));
 }
 
-template <>
-struct formatter<DecodedOp> {
-    constexpr auto parse(std::format_parse_context &ctx) { return ctx.begin(); }
+};  // namespace Opcode
 
-    auto format(const DecodedOp &decodedOp, auto &ctx) const {
-        const string opcodeString = getOpcodeString(decodedOp.opcode);
-        if (auto instr = get_if<WriteDecodedOp>(&decodedOp.instr)) {
+template <>
+struct formatter<Opcode::DecodedOp> {
+    constexpr auto parse(format_parse_context &ctx) { return ctx.begin(); }
+
+    auto format(const Opcode::DecodedOp &decodedOp, auto &ctx) const {
+        const string opcodeString = Opcode::getOpcodeString(decodedOp.opcode);
+        if (auto instr = get_if<Opcode::WriteDecodedOp>(&decodedOp.instr)) {
             return format_to(ctx.out(), "PC:0x{:X}  {}: ${}=0x{:X}",
                              decodedOp.pc, opcodeString, instr->dstRegId,
                              instr->value);
-        } else if (auto instr = get_if<LoadDecodedOp>(&decodedOp.instr)) {
+        } else if (auto instr = get_if<Opcode::LoadDecodedOp>(&decodedOp.instr)) {
             return format_to(ctx.out(), "PC:0x{:X}  {}: ${}=[0x{:X}]=0x{:X}",
                              decodedOp.pc, opcodeString, instr->dstRegId,
                              instr->addr, instr->value);
-        } else if (auto instr = get_if<StoreDecodedOp>(&decodedOp.instr)) {
+        } else if (auto instr = get_if<Opcode::StoreDecodedOp>(&decodedOp.instr)) {
             return format_to(ctx.out(), "PC:{:#X}  {}: [{:#X}]=${}={:#X}",
                              decodedOp.pc, opcodeString, instr->dstAddr,
                              instr->srcRegId, instr->value);
-        } else if (auto instr = get_if<BranchDecodedOp>(&decodedOp.instr)) {
+        } else if (auto instr = get_if<Opcode::BranchDecodedOp>(&decodedOp.instr)) {
             if (instr->pc.has_value())
                 return format_to(ctx.out(), "PC:{:#X} {}: $PC={:#X}",
                                  decodedOp.pc, opcodeString, instr->pc.value());
@@ -932,22 +943,30 @@ struct COP0 {
 };
 }  // namespace COP0
 
+namespace Kernel {
+
+// void putc(const Registers &reg) {
+//     u32 pc = reg.pc & 0x1FFFFFFF;
+//     if ((pc == 0xA0 && reg.gpr[9] == 0x3C) ||
+//         (pc == 0xB0 && reg.gpr[9] == 0x3D)) {
+//         println("{}", static_cast<char>(reg.gpr[4]));
+//     }
+// }
+
+}  // namespace Kernel
+   //
+   //
+
+namespace Mips {
+
+using namespace Opcode;
+
 struct Registers {
     array<u32, 32> gpr{0};
     u32 pc = 0;
     u32 hi = 0;
     u32 lo = 0;
 };
-
-namespace Kernel {
-void putc(const Registers &reg) {
-    u32 pc = reg.pc & 0x1FFFFFFF;
-    if ((pc == 0xA0 && reg.gpr[9] == 0x3C) ||
-        (pc == 0xB0 && reg.gpr[9] == 0x3D)) {
-        println("{}", static_cast<char>(reg.gpr[4]));
-    }
-}
-}  // namespace Kernel
 
 // Have to be careful about pc when setting EPC,
 // EPC should usually point to pc + 4,
@@ -981,7 +1000,7 @@ struct Cpu {
 
         while (true) {
             try {
-                Kernel::putc(reg);
+                // Kernel::putc(reg);
                 u32 opcode = mmap->load32(VAddress{reg.pc});
                 DecodedOp decodedOp = decode(opcode, prevDecoded);
                 println("{}", decodedOp);
@@ -1501,9 +1520,11 @@ struct Cpu {
     }
 };
 
+};  // namespace Mips
+
 int main() {
     try {
-        Cpu cpu;
+        Mips::Cpu cpu;
         cpu.runCpuLoop();
     } catch (const exception &ex) {
         println("{}", ex.what());
