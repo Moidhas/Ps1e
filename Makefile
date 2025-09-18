@@ -1,12 +1,14 @@
-exe := ps1
-testExe := test
+EXE := ./build/ps1
+TEST_EXE := ./build/test
+SRC := $(wildcard ./src/*.cc)
+TEST := ./tests/test.cc
 
-${exe}: main.cc
-	g++ main.cc -std=c++23 -g -Wall -o ${exe}
+${EXE}: ${SRC}
+	g++ ${SRC} -std=c++23 -g -Wall -o ${EXE}
 
-${testExe}: test.cc Ring.hpp BitUtils.hpp
-	g++ test.cc -std=c++23 -g -Wall -o ${testExe}
+${TEST_EXE}: ${SRC} ${TEST}
+	g++ ${SRC} ${TEST} -std=c++23 -g -Wall -o ${TEST_EXE}
 
 .PHONY: clean
 clean:
-	rm -rf ${exe} ${exe}.dSYM ${testExe} ${testExe}.dSYM
+	rm -rf ${EXE} ${EXE}.dSYM ${TEST_EXE} ${TEST_EXE}.dSYM
