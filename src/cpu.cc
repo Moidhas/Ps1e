@@ -19,34 +19,34 @@ Cpu::Cpu() : mmap{new MMap{}} { reg.pc() = RESET_VECTOR; }
 Cpu::~Cpu() { delete mmap; }
 
 void Cpu::runCpuLoop() {
-    DecodedOp prevDecoded{ZERO_INSTR};
-
     while (true) {
-        try {
-            // Kernel::putc(reg.gpr[Id::pc], reg.gpr[Id::t1],
-            // reg.gpr[Id::a0]);
-            u32 opcode = mmap->load32(VAddress{reg.gpr[Id::pc]});
-            DecodedOp decodedOp = decode(opcode, prevDecoded);
-            println("{}", decodedOp);
-            reg.gpr[Id::pc] += 4;
-
-            assert(0 <= prevDecoded.delay.dstId &&
-                   prevDecoded.delay.dstId <= reg.gpr.size());
-            reg.gpr[prevDecoded.delay.dstId] = prevDecoded.delay.value;
-
-            assert(0 <= decodedOp.instr.dstId &&
-                   decodedOp.instr.dstId <= reg.gpr.size());
-            reg.gpr[decodedOp.instr.dstId] = decodedOp.instr.value;
-
-            prevDecoded = decodedOp;
-            assert(reg.gpr[Id::zero] == 0);
-        } catch (const COP0::MipsException &e) {
-            handleMipsException(e);
-        }
+        runNextInstr();
     }
 }
 
-void Cpu::runNextInstr() {}
+void Cpu::runNextInstr() {
+    try {
+        // Kernel::putc(reg.gpr[Id::pc], reg.gpr[Id::t1],
+        // reg.gpr[Id::a0]);
+        u32 opcode = mmap->load32(VAddress{reg.gpr[Id::pc]});
+        DecodedOp decodedOp = decode(opcode, prevDecoded);
+        println("{}", decodedOp);
+        reg.gpr[Id::pc] += 4;
+
+        assert(0 <= prevDecoded.delay.dstId &&
+               prevDecoded.delay.dstId <= reg.gpr.size());
+        reg.gpr[prevDecoded.delay.dstId] = prevDecoded.delay.value;
+
+        assert(0 <= decodedOp.instr.dstId &&
+               decodedOp.instr.dstId <= reg.gpr.size());
+        reg.gpr[decodedOp.instr.dstId] = decodedOp.instr.value;
+
+        prevDecoded = decodedOp;
+        assert(reg.gpr[Id::zero] == 0);
+    } catch (const COP0::MipsException &e) {
+        handleMipsException(e);
+    }
+}
 
 void Cpu::handleMipsException(const COP0::MipsException &e) {
     cop0.epc = e.EPC;
