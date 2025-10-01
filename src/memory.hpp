@@ -2,6 +2,7 @@
 #define MEMORY_H
 
 #include <sys/stat.h>
+#include <array>
 #include <bitset>
 #include <cassert>
 #include <fstream>
@@ -98,9 +99,15 @@ struct MMap {
 
     static constexpr Range IO_RANGE{0x1F801000, 4 * KB};
     static constexpr Range MEM_CTRL1_RANGE{0x1F801000, 36};
-    Range SPU_RANGE{0x1F801D80, 0};
+    static constexpr Range INTERRUPT_CTRL{0x1F801070, 8};
+    static constexpr Range SPU_IO_RANGE{0x1F801C00, 640};
+    static constexpr Range DMA_IO_RANGE{0x1F801080, 0x80};
+    static constexpr Range GPU_IO_RANGE{0x1F801810, 8};
+
+    Range SPU_RAM_RANGE{0, 0};
     Range CDROM_RANGE{0x1F801800, 0};
 
+    AddressedValue<std::array<u32, 9>> timers{Range{0x1F801100, 0x32}};
     AddressedValue<std::array<MemCtrl1DelayReg, 6>> memCtrl1DelayRegs{
         Range{0x1F801008, 6 * 4}};
 

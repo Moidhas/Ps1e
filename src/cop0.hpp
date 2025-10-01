@@ -97,8 +97,7 @@ union CAUSE {
 };
 
 struct MipsException {
-    const u32 cause;
-    const u32 EPC;
+    const ExcCode code;
 };
 
 struct COP0 {

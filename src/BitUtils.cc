@@ -16,7 +16,6 @@ u32 extractBits(u32 bits, u32 start, u32 length) {
 // replaces the bits in dst with the bits in src acorrding to the bitRange.
 u32 replaceBitRange(const u32 dst, const u32 dstStart, const u32 src,
                     const u32 srcStart, const u32 length) {
-    static_assert(sizeof(dst) == sizeof(src));
     assert(NumOfBits<u32>() >= length + dstStart);
     assert(NumOfBits<u32>() >= length + srcStart);
     const u32 lengthOfOnes = (1 << length) - 1;

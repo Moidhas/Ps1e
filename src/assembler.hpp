@@ -106,6 +106,11 @@ enum class JumpOp : u8 {
     COUNT
 };
 
+// struct Opcode {
+//     const std::variant<PrimaryOps, SecondaryOps, JumpOp, COP0Opcode> opcode;
+// };
+
+
 std::string getPrimaryOpString(const PrimaryOps opcode);
 
 std::string getSecondaryOpString(SecondaryOps opcode);
@@ -151,8 +156,6 @@ enum Id {
     fp = 30,
     ra = 31,
     pc = 32,
-    hi = 33,
-    lo = 34,
 };
 
 struct OpcodeNode {
@@ -177,6 +180,11 @@ struct DebugInfo {
     u8 funct;
     u16 imm16;
     u32 imm26;  // target
+    u32 coprd;
+
+
+    bool operator==(const DebugInfo &rhs); 
+    bool operator==(std::variant<PrimaryOps, SecondaryOps, JumpOp, COP0Opcode> rhs); 
 
     template <typename It>
     It format_to(It out) const {
@@ -197,8 +205,8 @@ struct DebugInfo {
         using enum COP0Opcode;
         switch (copOp) {
             case MFC0:
-                out = std::format_to(out, "rt=${}, rd=${}, rt <- cop0[rd]", rt,
-                                     rd);
+                out = std::format_to(out, "rt=${}, rd=${}, rt <- cop0[rd]={:#x}", rt,
+                                     rd, coprd);
                 break;
             case MTC0:
                 out = std::format_to(
@@ -259,6 +267,8 @@ struct DebugInfo {
                 out = std::format_to(out, "imm26={:#X}", imm26);
                 break;
             case JALR:
+                out = std::format_to(out, "rs=${}={:#X}, rd=${}", rs, s, rd);
+                break;
             case JR:
                 out = std::format_to(out, "rs=${}={:#X}", rs, s);
                 break;
@@ -307,9 +317,13 @@ struct DebugInfo {
 struct DecodedOp {
     OpcodeNode instr;
     OpcodeNode delay;
+    bool nextInstrIsBranchDelay = false;
     std::optional<DebugInfo> debug;
     DecodedOp &withDebug(const DebugInfo &otherDebug);
 };
+
+
+DebugInfo decode(const u32 opcode); 
 
 };  // namespace Opcode
 
@@ -326,6 +340,20 @@ struct std::formatter<Opcode::DecodedOp> {
             return std::format_to(ctx.out(), "No debug info");
 
         Opcode::DebugInfo debugInfo = decodedOp.debug.value();
+        return debugInfo.format_to(ctx.out());
+    }
+};
+
+
+template <>
+struct std::formatter<Opcode::DebugInfo> {
+    constexpr auto parse(const std::format_parse_context &ctx) {
+        auto it = ctx.begin();
+        assert(it == ctx.end() || *it == '}');
+        return it;
+    }
+
+    auto format(const Opcode::DebugInfo &debugInfo, auto &ctx) const {
         return debugInfo.format_to(ctx.out());
     }
 };

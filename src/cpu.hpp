@@ -12,10 +12,10 @@ namespace Mips {
 using namespace Opcode;
 
 struct Registers {
-    std::array<u32, 35> gpr;
+    std::array<u32, 33> gpr;
     u32 &pc();
-    u32 &hi();
-    u32 &lo();
+    u32 hi;
+    u32 lo;
 
     u32 &operator[](size_t index);
 };
@@ -39,7 +39,7 @@ struct Cpu {
 
     void runNextInstr();
 
-    void handleMipsException(const COP0::MipsException &e);
+    void handleMipsException(const COP0::MipsException &e, bool BD);
 
     DecodedOp decode(const u32 opcode, const DecodedOp &prevInstr);
 
@@ -54,9 +54,15 @@ struct Cpu {
 
     void syscall();
 
+    std::tuple<u32, u32> multu(u64 s, u64 t);
+    std::tuple<u32, u32> divu(u32 s, u32 t);
+    std::tuple<s32, s32> div(s32 s, s32 t);
+
     u32 andi(const u32 op1, const u32 op2);
 
     u32 slt(const s32 s, const s32 t);
+
+    u32 sltiu(const u32 s, const u16 imm16);
 
     u32 sltu(const u32 s, const u32 t);
 
@@ -75,11 +81,18 @@ struct Cpu {
 
     u32 sb(const u32 value, const u32 s, const s16 imm16);
 
+    u32 sllv(const u32 s, const u32 t);
+    u32 srlv(const u32 s, const u32 t);
+    u32 srav(const u32 s, const u32 t);
     u32 sll(const u32 t, const u8 imm5);
+    u32 srl(const u32 t, const u8 imm5);
+    u32 sra(const s32 t, const u8 imm5); 
+    u32 lui(const u16 imm16) noexcept;
 
     u32 ori(const u32 s, const u16 imm16) noexcept;
 
-    u32 lui(const u16 imm16) noexcept;
+    u32 nor(const u32 s, const u32 t);
+
 
     // Reads the most significant bytes of the source into the least
     // significant bytes of the destination.

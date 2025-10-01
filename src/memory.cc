@@ -1,5 +1,7 @@
 #include "memory.hpp"
 
+#include "cop0.hpp"
+
 using namespace BitUtils;
 using namespace std;
 
@@ -47,22 +49,34 @@ u32 MMap::getIoReg(const PAddress pAddr) {
         return getMemCtrl1Reg(pAddr);
     } else if (ramSize.range.contains(addr)) {
         return ramSize.value;
+    } else if (INTERRUPT_CTRL.contains(addr)) {
+        assert((addr == 0x1F801070 || addr == 0x1F801074) &&
+               "INTERRUPT NOT YET IMPLEMENTED");
+        return 0;
+    } else if (DMA_IO_RANGE.contains(addr)) {
+        // println("DMA Not yet implemeneted");
+        return 0;
+    } else if (SPU_IO_RANGE.contains(addr)) {
+        // println("SPU Not yet implemeneted");
+        return 0;
+    } else if (GPU_IO_RANGE.contains(addr)) {
+        // println("GPU NOT IMPLEMENTED");
+        return 0;
     } else {
+        println("{:#X}", addr);
         assert(false);
     }
 }
 
 void MMap::updateDelayRegState(const DelayIdx idx) {
-    array<Range *, 6> dict = {&E1_RANGE,  &E3_RANGE,    &biosBuffer.range,
-                              &SPU_RANGE, &CDROM_RANGE, &E2_RANGE};
+    array<Range *, 6> dict = {&E1_RANGE,      &E3_RANGE,    &biosBuffer.range,
+                              &SPU_RAM_RANGE, &CDROM_RANGE, &E2_RANGE};
 
     assert(static_cast<u32>(idx) < dict.size());
 
     dict[static_cast<u32>(idx)]->byteLength =
         (1
          << memCtrl1DelayRegs.value[static_cast<u32>(idx)].numberOfAddressBits);
-
-    const u32 byteLength = dict[static_cast<u32>(idx)]->byteLength;
 }
 
 void MMap::writeMemCtrl1Register(const PAddress paddr, const u32 value) {
@@ -91,6 +105,7 @@ void MMap::writeMemCtrl1Register(const PAddress paddr, const u32 value) {
 
 void MMap::writeIoReg(const PAddress pAddr, const u32 value) {
     const u32 addr = pAddr.m_addr;
+
     if (MEM_CTRL1_RANGE.contains(addr)) {
         writeMemCtrl1Register(pAddr, value);
     } else if (ramSize.range.contains(addr)) {
@@ -99,9 +114,24 @@ void MMap::writeIoReg(const PAddress pAddr, const u32 value) {
         const array<u8, 4> ramSizes{1, 4, 2, 8};
         ramBuffer.range.byteLength = ramSizes[ramRangeChoice] * MB;
         ramSize.value = value;
+    } else if (SPU_IO_RANGE.contains(addr)) {
+        // println("SPU Not yet implemeneted");
+    } else if (INTERRUPT_CTRL.contains(addr)) {
+        // println("write to INTERRUPT_CTRL");
+        // assert(false && "write to INTERRUPT_CTRL");
+    } else if (timers.range.contains(addr)) {
+        if (value != 0) {
+            // println("{:#X}, {:#X}", addr, value);
+        }
+        // println("TIMERS NOT YET IMPLEMENTED");
+    } else if (DMA_IO_RANGE.contains(addr)) {
+        // println("DMA Not yet implemeneted");
+        return;
+    } else if (GPU_IO_RANGE.contains(addr)) {
+        return;
     } else {
-        // println("{:#X}", pAddr.m_addr);
-        // assert(false);
+        println("{:#X}", pAddr.m_addr);
+        assert(false);
     }
 }
 
@@ -118,16 +148,19 @@ PAddress MMap::getPAddr(const VAddress vAddr) {
         paddr.m_addr = m_addr;
     } else if (KSEG2_RANGE.contains(addr))
         paddr.m_addr = addr;
-    else
-        // BUS ERROR
+    else {
+        // I should be throwing AdEL, or AdES
         assert(false);
+    }
 
     return paddr;
 }
 
 u32 MMap::handleBufferRead(const AddressedValue<span<u8>> &addressedBuffer,
-                     const PAddress paddr, const u8 numOfBytes) {
+                           const PAddress paddr, const u8 numOfBytes) {
     const u32 addr = paddr.m_addr;
+    assert(addr % numOfBytes == 0);
+
     const u32 idx = addressedBuffer.range.getOffset(addr);
     assert(addressedBuffer.value.size() >= idx + numOfBytes);
     u32 accBytes{0};
@@ -135,6 +168,7 @@ u32 MMap::handleBufferRead(const AddressedValue<span<u8>> &addressedBuffer,
         const u32 byte = addressedBuffer.value[idx + i] << (8 * i);
         accBytes |= byte;
     }
+
     return accBytes;
 }
 
@@ -142,30 +176,25 @@ u32 MMap::handleRead(const PAddress paddr, const u8 numOfBytes) {
     assert(numOfBytes <= 4);
     const u32 addr = paddr.m_addr;
 
-    if (paddr.m_addr == 0XB0) {
-    }
+    assert(addr % numOfBytes == 0);
+    if (addr % numOfBytes != 0) throw COP0::MipsException{COP0::ExcCode::AdEL};
 
     if (ramBuffer.range.contains(addr)) {
         const u32 value = handleBufferRead(
             {span{ramBuffer.value}, ramBuffer.range}, paddr, numOfBytes);
-
-        if (addr == 0xB0) {
-            println("**** **** Value reading: {:#X}", value);
-        }
-
+        // println("[{:#X}] = {:#X}", addr, value);
         return value;
     } else if (E1_RANGE.contains(addr)) {
-        println("E1");
+        // println("E1");
         // assert(false);
         return 0;
     } else if (SCRATCHPAD_RANGE.contains(addr)) {
-        // println("SCRATCHPAD_RANGE");
         assert(false);
     } else if (IO_RANGE.contains(addr)) {
         // println("IO_RANGE");
         return getIoReg(PAddress{addr});
     } else if (E2_RANGE.contains(addr)) {
-        println("E2_RANGE");
+        // println("E2_RANGE");
         assert(false);
     } else if (E3_RANGE.contains(addr)) {
         // println("E3_RANGE");
@@ -183,39 +212,43 @@ u32 MMap::handleRead(const PAddress paddr, const u8 numOfBytes) {
 }
 
 void MMap::handleBufferWrite(AddressedValue<span<u8>> addressedBuffer,
-                       const PAddress paddr, const u8 numOfBytes,
-                       const u32 value) {
+                             const PAddress paddr, const u8 numOfBytes,
+                             const u32 value) {
     const u32 addr = paddr.m_addr;
+    assert(addr % numOfBytes == 0);
+
     const u32 idx = addressedBuffer.range.getOffset(addr);
     assert(addressedBuffer.value.size() >= idx + numOfBytes);
     for (int i = 0; i < numOfBytes; ++i) {
         const u8 byte = (value & (0xFF << (8 * i))) >> (8 * i);
         addressedBuffer.value[idx + i] = byte;
     }
+
+    // println("[{:#X}] <- {:#X}", addr, value);
 }
 
-void MMap::handleWrite(const PAddress paddr, const u32 value, const u8 numOfBytes) {
+void MMap::handleWrite(const PAddress paddr, const u32 value,
+                       const u8 numOfBytes) {
     assert(numOfBytes <= 4);
     const u32 addr = paddr.m_addr;
 
+    assert(addr % numOfBytes == 0);
+    if (addr % numOfBytes != 0) throw COP0::MipsException{COP0::ExcCode::AdES};
+
     if (ramBuffer.range.contains(addr)) {
-        if (addr == 0xB0) {
-            println("**** **** Value writing: {:#X}", value);
-        }
         handleBufferWrite({span{ramBuffer.value}, ramBuffer.range}, paddr,
                           numOfBytes, value);
     } else if (E1_RANGE.contains(addr)) {
-        println("E1");
+        // println("E1");
         assert(false);
     } else if (SCRATCHPAD_RANGE.contains(addr)) {
-        println("SCRATCHPAD_RANGE");
         assert(false);
     } else if (IO_RANGE.contains(addr)) {
         writeIoReg(paddr, value);
     } else if (E2_RANGE.contains(addr)) {
         assert(addr == 0x1F802041);
     } else if (E3_RANGE.contains(addr)) {
-        println("E3_RANGE");
+        // println("E3_RANGE");
         assert(false);
     } else if (biosBuffer.range.contains(addr)) {
         assert(false);
