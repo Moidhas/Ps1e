@@ -13,6 +13,13 @@
 #include "BitUtils.hpp"
 #include "types.hpp"
 
+
+struct HeaderReg {
+    u32 pc;
+    u32 gp;
+    u32 sp;
+};
+
 // TODO: Combine the range with buffer.
 struct Range {
     u32 start;
@@ -135,6 +142,8 @@ struct MMap {
         CDROM_DELAY,
         E2_DELAY
     };
+
+    HeaderReg sideload();
 
     u32 getMemCtrl1DelayRegIdx(const PAddress paddr);
 

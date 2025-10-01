@@ -3,6 +3,7 @@
 #include "BitUtils.hpp"
 #include "assembler.hpp"
 #include "cop0.hpp"
+#include "memory.hpp"
 
 using namespace std;
 using namespace Opcode;
@@ -45,6 +46,13 @@ void Cpu::runNextInstr() {
     // BD is set when the Current Instruction being ran is in a Branch Delay.
     bool BD = prevDecoded.nextInstrIsBranchDelay;
     try {
+        if (reg.pc() == 0x80030000) {
+            HeaderReg hreg = mmap->sideload();
+            reg.gpr[Id::pc] = hreg.pc;
+            reg.gpr[Id::gp] = hreg.gp;
+            reg.gpr[Id::sp] = hreg.sp == 0 ? reg.gpr[Id::sp] : hreg.sp;
+        }
+
         Kernel::putc(reg.gpr[Id::pc], reg.gpr[Id::t1], reg.gpr[Id::a0]);
         u32 opcode = mmap->load32(VAddress{reg.gpr[Id::pc]});
         DecodedOp decodedOp = decode(opcode, prevDecoded);

@@ -190,6 +190,7 @@ u32 MMap::handleRead(const PAddress paddr, const u8 numOfBytes) {
         return 0;
     } else if (SCRATCHPAD_RANGE.contains(addr)) {
         assert(false);
+        return 0;
     } else if (IO_RANGE.contains(addr)) {
         // println("IO_RANGE");
         return getIoReg(PAddress{addr});
@@ -259,6 +260,39 @@ void MMap::handleWrite(const PAddress paddr, const u32 value,
         assert(false);
     }
 }
+
+
+u32 bufrd(const span<u8> bufr, u32 idx, const u8 numOfBytes) {
+    u32 accBytes{0};
+    assert(idx + numOfBytes <= bufr.size());
+
+    for (int i = 0; i < numOfBytes; ++i) {
+        const u32 byte = bufr[idx + i] << (8 * i);
+        accBytes |= byte;
+    }
+
+    return accBytes;
+}
+
+
+HeaderReg MMap::sideload() {
+    struct stat info;
+    stat("./tests/psxtest_cpu.exe", &info);
+    ifstream exe{"./tests/psxtest_cpu.exe", ios::binary | ios::in};
+
+    array<u8, 2*KB> header;
+    exe.read((char *)header.data(), header.size());
+    u32 pc = bufrd(header, 0x10, 4);
+    u32 gp = bufrd(header, 0x14, 4);
+    u32 dstAddr = getPAddr(VAddress{bufrd(header, 0x18, 4)}).m_addr;
+    u32 filesize = bufrd(header, 0x1C, 4) * 2 * KB;
+    u32 sp = bufrd(header, 0x30, 4);
+
+    u32 idx = ramBuffer.range.getOffset(dstAddr);
+    exe.read((char *)&ramBuffer.value[idx], filesize);
+    return {pc, gp, sp};
+}
+
 
 MMap::MMap() {
     struct stat info;
