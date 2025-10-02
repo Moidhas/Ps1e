@@ -22,37 +22,34 @@ Cpu::Cpu() : mmap{new MMap{}} { reg.pc() = RESET_VECTOR; }
 Cpu::~Cpu() { delete mmap; }
 
 void Cpu::runCpuLoop() {
-    println(
-        "HIGH PRIORITY IMPLEMENT THE CACHE, THE ISOLATE BIT IN SR DEPENDS ON "
-        "IT");
     while (true) {
         runNextInstr();
     }
-    println(
-        "HIGH PRIORITY IMPLEMENT THE CACHE, THE ISOLATE BIT IN SR DEPENDS ON "
-        "IT");
 }
 
 namespace Kernel {
-    void putc(u32 pc, u32 t1, u8 a0) {
-        pc &= 0x1FFFFFFF;
-        if ((pc == 0xA0 && t1 == 0x3C) || (pc == 0xB0 && t1 == 0x3D)) {
-            print("{}", (char)a0);
-        }
+void putc(u32 pc, u32 t1, u8 a0) {
+    pc &= 0x1FFFFFFF;
+    if ((pc == 0xA0 && t1 == 0x3C) || (pc == 0xB0 && t1 == 0x3D)) {
+        print("{}", (char)a0);
     }
-};
+}
+};  // namespace Kernel
 
 void Cpu::runNextInstr() {
     // BD is set when the Current Instruction being ran is in a Branch Delay.
     bool BD = prevDecoded.nextInstrIsBranchDelay;
     try {
         if (reg.pc() == 0x80030000) {
+            flag = true;
             HeaderReg hreg = mmap->sideload();
             reg.gpr[Id::pc] = hreg.pc;
             reg.gpr[Id::gp] = hreg.gp;
             reg.gpr[Id::sp] = hreg.sp == 0 ? reg.gpr[Id::sp] : hreg.sp;
+            prevDecoded = ZERO_INSTR;
         }
 
+        mmap->isc = cop0.sr.IsC;
         Kernel::putc(reg.gpr[Id::pc], reg.gpr[Id::t1], reg.gpr[Id::a0]);
         u32 opcode = mmap->load32(VAddress{reg.gpr[Id::pc]});
         DecodedOp decodedOp = decode(opcode, prevDecoded);
@@ -82,7 +79,8 @@ void Cpu::handleMipsException(const COP0::MipsException &e, bool BD) {
 
     cop0.sr.data = cop0.srStackPush(true, false);
     reg.gpr[Id::pc] = cop0.sr.BEV ? 0xbfc00180 : 0x80000080;
-    // println("EPC: {:#X}, CAUSE: {:#X}", cop0.epc, cop0.cause.ExcCode.GetValue());
+    // println("EPC: {:#X}, CAUSE: {:#X}", cop0.epc,
+    // cop0.cause.ExcCode.GetValue());
 }
 
 DecodedOp Cpu::decode(const u32 opcode, const DecodedOp &prevInstr) {
@@ -212,6 +210,11 @@ DecodedOp Cpu::decodePrimary(const u32 opcode, const DecodedOp &prevInstr) {
         case ORI:
             decodedOp = {.instr = {.value = ori(reg.gpr[rs], imm16),
                                    .dstId = static_cast<Id>(rt)}};
+            break;
+        case XORI:
+            decodedOp = {
+                .instr = {.value = reg.gpr[rs] ^ static_cast<u32>(imm16),
+                          .dstId = static_cast<Id>(rt)}};
             break;
         case ANDI:
             decodedOp = {.instr = {.value = andi(reg.gpr[rs], imm16),
@@ -425,6 +428,10 @@ DecodedOp Cpu::decodeSecondary(const u32 opcode) {
             decodedOp = {.instr = {.value = orInstr(reg.gpr[rs], reg.gpr[rt]),
                                    .dstId = static_cast<Id>(rd)}};
             break;
+        case XOR:
+            decodedOp = {.instr = {.value = reg.gpr[rs] ^ reg.gpr[rt],
+                                   .dstId = static_cast<Id>(rd)}};
+            break;
         case SLT:
             decodedOp = {.instr = {.value = slt(reg.gpr[rs], reg.gpr[rt]),
                                    .dstId = static_cast<Id>(rd)}};
@@ -446,7 +453,7 @@ DecodedOp Cpu::decodeSecondary(const u32 opcode) {
             break;
         }
         case MULTU: {
-            auto [lo, hi] = multu(reg.gpr[rs], reg.gpr[rt]); 
+            auto [lo, hi] = multu(reg.gpr[rs], reg.gpr[rt]);
             reg.lo = lo;
             reg.hi = hi;
             break;
@@ -549,7 +556,8 @@ u32 Cpu::sw(const u32 value, const u32 s, const s16 imm16) {
     const u32 addr = s + imm16;
     assert(addr % 4 == 0);
     if (cop0.sr.IsC == 1) {
-        // println("Ignore store for now need to implement cache for isolation");
+        // println("Ignore store for now need to implement cache for
+        // isolation");
         return addr;
     }
     mmap->store32(VAddress{addr}, value);
@@ -560,7 +568,8 @@ u32 Cpu::sh(const u32 value, const u32 s, const s16 imm16) {
     const u32 addr = s + imm16;
     assert(addr % 2 == 0);
     if (cop0.sr.IsC == 1) {
-        // println("Ignore store for now need to implement cache for isolation");
+        // println("Ignore store for now need to implement cache for
+        // isolation");
         return addr;
     }
     mmap->store16(VAddress{addr}, value);
@@ -570,7 +579,8 @@ u32 Cpu::sh(const u32 value, const u32 s, const s16 imm16) {
 u32 Cpu::sb(const u32 value, const u32 s, const s16 imm16) {
     const u32 addr = s + imm16;
     if (cop0.sr.IsC == 1) {
-        // println("Ignore store for now need to implement cache for isolation");
+        // println("Ignore store for now need to implement cache for
+        // isolation");
         return addr;
     }
     mmap->store8(VAddress{addr}, value);

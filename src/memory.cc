@@ -60,8 +60,7 @@ u32 MMap::getIoReg(const PAddress pAddr) {
         // println("SPU Not yet implemeneted");
         return 0;
     } else if (GPU_IO_RANGE.contains(addr)) {
-        // println("GPU NOT IMPLEMENTED");
-        return 0;
+        return static_cast<u32>(~0);
     } else {
         println("{:#X}", addr);
         assert(false);
@@ -144,7 +143,7 @@ PAddress MMap::getPAddr(const VAddress vAddr) {
     if (condition) {
         const u32 m_addr{~0xE0000000 & addr};
         assert(
-            !(KSEG1_RANGE.contains(addr) && SCRATCHPAD_RANGE.contains(m_addr)));
+            !(KSEG1_RANGE.contains(addr) && scratchpadBuffer.range.contains(m_addr)));
         paddr.m_addr = m_addr;
     } else if (KSEG2_RANGE.contains(addr))
         paddr.m_addr = addr;
@@ -176,21 +175,26 @@ u32 MMap::handleRead(const PAddress paddr, const u8 numOfBytes) {
     assert(numOfBytes <= 4);
     const u32 addr = paddr.m_addr;
 
+    assert(isc == 1 || isc == 0);
     assert(addr % numOfBytes == 0);
     if (addr % numOfBytes != 0) throw COP0::MipsException{COP0::ExcCode::AdEL};
 
     if (ramBuffer.range.contains(addr)) {
+        if (isc == 1) {
+            const u32 idx = ramBuffer.range.getOffset(addr);
+            assert(idx < scratchpadBuffer.value.size());
+            assert(idx == scratchpadBuffer.range.getOffset(addr));
+            return handleBufferRead({span{scratchpadBuffer.value}, scratchpadBuffer.range}, paddr, numOfBytes);
+        }
         const u32 value = handleBufferRead(
             {span{ramBuffer.value}, ramBuffer.range}, paddr, numOfBytes);
-        // println("[{:#X}] = {:#X}", addr, value);
         return value;
     } else if (E1_RANGE.contains(addr)) {
         // println("E1");
         // assert(false);
         return 0;
-    } else if (SCRATCHPAD_RANGE.contains(addr)) {
-        assert(false);
-        return 0;
+    } else if (scratchpadBuffer.range.contains(addr)) {
+        return handleBufferRead({span{scratchpadBuffer.value}, scratchpadBuffer.range}, paddr, numOfBytes);
     } else if (IO_RANGE.contains(addr)) {
         // println("IO_RANGE");
         return getIoReg(PAddress{addr});
@@ -233,16 +237,24 @@ void MMap::handleWrite(const PAddress paddr, const u32 value,
     assert(numOfBytes <= 4);
     const u32 addr = paddr.m_addr;
 
+    assert(isc == 1 || isc == 0);
     assert(addr % numOfBytes == 0);
     if (addr % numOfBytes != 0) throw COP0::MipsException{COP0::ExcCode::AdES};
 
     if (ramBuffer.range.contains(addr)) {
+        if (isc == 1) {
+            const u32 idx = ramBuffer.range.getOffset(addr);
+            assert(idx < scratchpadBuffer.value.size());
+            assert(idx == scratchpadBuffer.range.getOffset(addr));
+            handleBufferWrite({span{scratchpadBuffer.value}, scratchpadBuffer.range}, paddr, numOfBytes, value);
+            return;
+        }
         handleBufferWrite({span{ramBuffer.value}, ramBuffer.range}, paddr,
                           numOfBytes, value);
     } else if (E1_RANGE.contains(addr)) {
         // println("E1");
         assert(false);
-    } else if (SCRATCHPAD_RANGE.contains(addr)) {
+    } else if (scratchpadBuffer.range.contains(addr)) {
         assert(false);
     } else if (IO_RANGE.contains(addr)) {
         writeIoReg(paddr, value);
@@ -285,8 +297,11 @@ HeaderReg MMap::sideload() {
     u32 pc = bufrd(header, 0x10, 4);
     u32 gp = bufrd(header, 0x14, 4);
     u32 dstAddr = getPAddr(VAddress{bufrd(header, 0x18, 4)}).m_addr;
-    u32 filesize = bufrd(header, 0x1C, 4) * 2 * KB;
+    u32 filesize = bufrd(header, 0x1C, 4);
     u32 sp = bufrd(header, 0x30, 4);
+
+    assert((filesize % (2 * KB)) == 0);
+    assert((filesize + (2 * KB)) == info.st_size);
 
     u32 idx = ramBuffer.range.getOffset(dstAddr);
     exe.read((char *)&ramBuffer.value[idx], filesize);

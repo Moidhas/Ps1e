@@ -94,6 +94,7 @@ struct MMap {
     static constexpr Range KSEG1_RANGE{0xA0000000, 512 * MB};
     static constexpr Range KSEG2_RANGE{0xC0000000, GB};
     static constexpr Range EXCEPTION_HANDLER{0x00000080, 0x10};
+    u8 isc;
 
     AddressedValue<std::array<u8, 2 * MB>> ramBuffer{
         Range{0x00000000, 2 * MB, 2 * MB - 1}};
@@ -101,8 +102,7 @@ struct MMap {
     Range E1_RANGE{0x1F000000, 512 * KB};
     std::array<u8, 512 * KB> e1Buffer;
 
-    static constexpr Range SCRATCHPAD_RANGE{0x1F800000, KB};
-    std::array<u8, SCRATCHPAD_RANGE.byteLength> scratchpadBuffer;
+    AddressedValue<std::array<u8, KB>> scratchpadBuffer{Range{0x1F800000, KB}};
 
     static constexpr Range IO_RANGE{0x1F801000, 4 * KB};
     static constexpr Range MEM_CTRL1_RANGE{0x1F801000, 36};

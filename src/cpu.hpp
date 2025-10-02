@@ -26,6 +26,7 @@ struct Registers {
 struct Cpu {
     constexpr static u32 RESET_VECTOR = 0xBFC00000;
     constexpr static DecodedOp ZERO_INSTR;
+    bool flag{false};
 
     Registers reg;
     COP0::COP0 cop0;
