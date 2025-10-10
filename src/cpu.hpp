@@ -26,7 +26,6 @@ struct Registers {
 struct Cpu {
     constexpr static u32 RESET_VECTOR = 0xBFC00000;
     constexpr static DecodedOp ZERO_INSTR;
-    bool flag{false};
 
     Registers reg;
     COP0::COP0 cop0;
@@ -55,6 +54,7 @@ struct Cpu {
 
     void syscall();
 
+    std::tuple<u32, u32> mult(s32 s, s32 t);
     std::tuple<u32, u32> multu(u64 s, u64 t);
     std::tuple<u32, u32> divu(u32 s, u32 t);
     std::tuple<s32, s32> div(s32 s, s32 t);
@@ -97,11 +97,11 @@ struct Cpu {
 
     // Reads the most significant bytes of the source into the least
     // significant bytes of the destination.
-    std::tuple<u32, u32> lwr(const u32 dest, const u32 base, const s16 offset);
+    std::tuple<u32, u32> lwr(u32 dst, const u32 base, const s16 offset);
 
     // Reads the least significant bytes of the source into the most significant
     // bytes of the destination.
-    std::tuple<u32, u32> lwl(const u32 dest, const u32 base, const s16 offset);
+    std::tuple<u32, u32> lwl(u32 dst, const u32 base, const s16 offset);
 
     // implicit sign-extension, this does not work in 1's complement.
     std::tuple<u32, u32> lb(const u32 s, const s16 imm16);

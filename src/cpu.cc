@@ -41,12 +41,10 @@ void Cpu::runNextInstr() {
     bool BD = prevDecoded.nextInstrIsBranchDelay;
     try {
         if (reg.pc() == 0x80030000) {
-            flag = true;
             HeaderReg hreg = mmap->sideload();
             reg.gpr[Id::pc] = hreg.pc;
             reg.gpr[Id::gp] = hreg.gp;
             reg.gpr[Id::sp] = hreg.sp == 0 ? reg.gpr[Id::sp] : hreg.sp;
-            prevDecoded = ZERO_INSTR;
         }
 
         mmap->isc = cop0.sr.IsC;
@@ -54,7 +52,6 @@ void Cpu::runNextInstr() {
         u32 opcode = mmap->load32(VAddress{reg.gpr[Id::pc]});
         DecodedOp decodedOp = decode(opcode, prevDecoded);
         reg.gpr[Id::pc] += 4;
-
         assert(0 <= prevDecoded.delay.dstId &&
                prevDecoded.delay.dstId <= reg.gpr.size());
         reg.gpr[prevDecoded.delay.dstId] = prevDecoded.delay.value;
@@ -64,7 +61,7 @@ void Cpu::runNextInstr() {
         reg.gpr[decodedOp.instr.dstId] = decodedOp.instr.value;
 
         prevDecoded = decodedOp;
-        assert(reg.gpr[Id::zero] == 0);
+        reg.gpr[Id::zero] = 0;
     } catch (const COP0::MipsException &e) {
         handleMipsException(e, BD);
     }
@@ -79,8 +76,6 @@ void Cpu::handleMipsException(const COP0::MipsException &e, bool BD) {
 
     cop0.sr.data = cop0.srStackPush(true, false);
     reg.gpr[Id::pc] = cop0.sr.BEV ? 0xbfc00180 : 0x80000080;
-    // println("EPC: {:#X}, CAUSE: {:#X}", cop0.epc,
-    // cop0.cause.ExcCode.GetValue());
 }
 
 DecodedOp Cpu::decode(const u32 opcode, const DecodedOp &prevInstr) {
@@ -151,7 +146,6 @@ DecodedOp Cpu::decodePrimary(const u32 opcode, const DecodedOp &prevInstr) {
             break;
         }
         case LWL: {
-            assert(false);
             auto [value, addr] =
                 lwl(prevInstr.delay.dstId == rt ? prevInstr.delay.value
                                                 : reg.gpr[rt],
@@ -179,7 +173,6 @@ DecodedOp Cpu::decodePrimary(const u32 opcode, const DecodedOp &prevInstr) {
             break;
         }
         case LWR: {
-            assert(false);
             auto [value, addr] =
                 lwr(prevInstr.delay.dstId == rt ? prevInstr.delay.value
                                                 : reg.gpr[rt],
@@ -221,8 +214,9 @@ DecodedOp Cpu::decodePrimary(const u32 opcode, const DecodedOp &prevInstr) {
                                    .dstId = static_cast<Id>(rt)}};
             break;
         case SLTI:
-            decodedOp = {.instr = {.value = slt(reg.gpr[rs], imm16),
-                                   .dstId = static_cast<Id>(rt)}};
+            decodedOp = {
+                .instr = {.value = slt(reg.gpr[rs], static_cast<s16>(imm16)),
+                          .dstId = static_cast<Id>(rt)}};
             break;
         case SLTIU:
             decodedOp = {.instr = {.value = sltiu(reg.gpr[rs], imm16),
@@ -307,6 +301,20 @@ DecodedOp Cpu::handleJumpOp(const JumpOp jumpOp, const u32 opcode) {
                             ? DecodedOp{.delay = {.value = newPc.value(),
                                                   .dstId = Id::pc}}
                             : DecodedOp{};
+            break;
+        }
+        case BLTZAL:
+        case BGEZAL: {
+            optional<u32> newPc =
+                branchCMPHelper(reg.gpr[Id::pc], imm16,
+                                cond[static_cast<size_t>(jumpOp) -
+                                     static_cast<size_t>(BLTZAL)]);
+
+            decodedOp.instr = {.value = pcAfterDelaySlot, .dstId = Id::ra};
+
+            if (newPc.has_value())
+                decodedOp.delay = {.value = newPc.value(), .dstId = Id::pc};
+
             break;
         }
         default:
@@ -452,6 +460,12 @@ DecodedOp Cpu::decodeSecondary(const u32 opcode) {
             reg.hi = hi;
             break;
         }
+        case MULT: {
+            auto [lo, hi] = mult(reg.gpr[rs], reg.gpr[rt]);
+            reg.lo = lo;
+            reg.hi = hi;
+            break;
+        }
         case MULTU: {
             auto [lo, hi] = multu(reg.gpr[rs], reg.gpr[rt]);
             reg.lo = lo;
@@ -460,7 +474,7 @@ DecodedOp Cpu::decodeSecondary(const u32 opcode) {
         }
         // Technically I should enforce the fact that the next two
         // instructions can't write to lo/hi after reads from lo/hi
-        // respectively.
+        // respectively, and vice-versa.
         case MFLO:
             decodedOp = {
                 .instr = {.value = reg.lo, .dstId = static_cast<Id>(rd)}};
@@ -496,6 +510,15 @@ DecodedOp Cpu::decodeSecondary(const u32 opcode) {
 
 void Cpu::syscall() { throw COP0::MipsException{COP0::ExcCode::Syscall}; }
 
+// C++ Trivia: you won't get sign extension if you cast from u32 to s64
+// since static_cast<s64>(u32) = static_cast<s64>(static_cast<u64>(u32))
+tuple<u32, u32> Cpu::mult(s32 s, s32 t) {
+    const u64 res = static_cast<s64>(s) * static_cast<s64>(t);
+    const u32 hi = res >> 32;
+    const u32 lo = res;
+    return {lo, hi};
+}
+
 tuple<u32, u32> Cpu::multu(u64 s, u64 t) {
     const u64 res = s * t;
     const u32 hi = res >> 32;
@@ -504,7 +527,7 @@ tuple<u32, u32> Cpu::multu(u64 s, u64 t) {
 }
 
 tuple<u32, u32> Cpu::divu(u32 s, u32 t) {
-    if (t == 0) return {INT_MAX, s};
+    if (t == 0) return {static_cast<u32>(~0), s};
 
     return {s / t, s % t};
 }
@@ -616,28 +639,36 @@ u32 Cpu::lui(const u16 imm16) noexcept { return static_cast<u32>(imm16) << 16; }
 
 // Reads the most significant bytes of the source into the least
 // significant bytes of the destination.
-tuple<u32, u32> Cpu::lwr(const u32 dest, const u32 base, const s16 offset) {
+tuple<u32, u32> Cpu::lwr(u32 dst, const u32 base, const s16 offset) {
     const u32 addr = base + offset;
     const u32 wordAddr = (addr / 4) * 4;
-    const u32 src = mmap->load32(VAddress{wordAddr});
-    const u32 bitLength = (addr - wordAddr + 1) * 8;
-    return {replaceBitRange(dest, 0, src,
-                            static_cast<u32>(NumOfBits<u32>() - bitLength),
-                            bitLength),
-            addr};
+    const u32 bitLength = (4 - (addr - wordAddr)) * 8;
+
+    assert(addr - wordAddr <= 3);
+    assert(32 - bitLength >= 0);
+
+    u32 src = mmap->load32(VAddress{wordAddr});
+    src >>= (32 - bitLength);
+    const u32 mask = ~((1ULL << bitLength) - 1);
+    dst &= mask;
+
+    return {dst | src, addr};
 }
 
 // Reads the least significant bytes of the source into the most significant
 // bytes of the destination.
-tuple<u32, u32> Cpu::lwl(const u32 dest, const u32 base, const s16 offset) {
+tuple<u32, u32> Cpu::lwl(u32 dst, const u32 base, const s16 offset) {
     const u32 addr = base + offset;
     const u32 wordAddr = (addr / 4) * 4;
-    const u32 src = mmap->load32(VAddress{wordAddr});
     const u32 bitLength = (addr - wordAddr + 1) * 8;
-    return {
-        replaceBitRange(dest, static_cast<u32>(NumOfBits<u32>() - bitLength),
-                        src, 0, bitLength),
-        addr};
+    assert(32 - bitLength >= 0);
+
+    u32 src = mmap->load32(VAddress{wordAddr});
+    src <<= (32 - bitLength);
+    const u32 mask = ~(((1ULL << bitLength) - 1) << (32 - bitLength));
+    dst &= mask;
+
+    return {dst | src, addr};
 }
 
 // implicit sign-extension, this does not work in 1's complement.
@@ -655,26 +686,22 @@ tuple<u32, u32> Cpu::lbu(const u32 s, const s16 imm16) {
 // implicit sign-extension, this does not work in 1's complement.
 tuple<u32, u32> Cpu::lh(const u32 s, const s16 imm16) {
     const u32 addr = s + imm16;
-    assert(addr % 2 == 0);
     const s32 value = static_cast<s16>(mmap->load16(VAddress{addr}));
     return {value, addr};
 }
 
 tuple<u32, u32> Cpu::lhu(const u32 s, const s16 imm16) {
     const u32 addr = s + imm16;
-    assert(addr % 2 == 0);
     return {mmap->load16(VAddress{addr}), addr};
 }
 
 tuple<u32, u32> Cpu::lw(const u32 s, const s16 imm16) {
     const u32 addr = s + imm16;
-    assert(addr % 4 == 0);
     return {mmap->load32(VAddress{s + imm16}), addr};
 }
 
 s32 Cpu::addi(const s32 s, const s16 imm16) {
     if ((s > 0 && imm16 > INT_MAX - s) || (s < 0 && imm16 < INT_MIN - s)) {
-        assert(false);
         throw COP0::MipsException{COP0::ExcCode::Ov};
     }
 
@@ -687,7 +714,6 @@ u32 Cpu::addu(const u32 s, const u32 t) { return s + t; }
 
 s32 Cpu::add(const s32 s, const s32 t) {
     if ((s > 0 && t > INT_MAX - s) || (s < 0 && t < INT_MIN - s)) {
-        assert(false && "OVERFLOW IN ADD");
         throw COP0::MipsException{COP0::ExcCode::Ov};
     }
 
@@ -698,7 +724,6 @@ u32 Cpu::subu(const u32 s, const u32 t) { return s - t; }
 
 s32 Cpu::sub(const s32 s, const s32 t) {
     if ((t > 0 && s < INT_MIN + t) || (t < 0 && s > INT_MAX + t)) {
-        assert(false);
         throw COP0::MipsException{COP0::ExcCode::Ov};
     }
 

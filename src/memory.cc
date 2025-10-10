@@ -176,14 +176,13 @@ u32 MMap::handleRead(const PAddress paddr, const u8 numOfBytes) {
     const u32 addr = paddr.m_addr;
 
     assert(isc == 1 || isc == 0);
-    assert(addr % numOfBytes == 0);
     if (addr % numOfBytes != 0) throw COP0::MipsException{COP0::ExcCode::AdEL};
 
     if (ramBuffer.range.contains(addr)) {
         if (isc == 1) {
             const u32 idx = ramBuffer.range.getOffset(addr);
             assert(idx < scratchpadBuffer.value.size());
-            assert(idx == scratchpadBuffer.range.getOffset(addr));
+            assert(idx == scratchpadBuffer.range.getOffset(addr + scratchpadBuffer.range.start));
             return handleBufferRead({span{scratchpadBuffer.value}, scratchpadBuffer.range}, paddr, numOfBytes);
         }
         const u32 value = handleBufferRead(
@@ -255,7 +254,7 @@ void MMap::handleWrite(const PAddress paddr, const u32 value,
         // println("E1");
         assert(false);
     } else if (scratchpadBuffer.range.contains(addr)) {
-        assert(false);
+        handleBufferWrite({span{scratchpadBuffer.value}, scratchpadBuffer.range}, paddr, numOfBytes, value);
     } else if (IO_RANGE.contains(addr)) {
         writeIoReg(paddr, value);
     } else if (E2_RANGE.contains(addr)) {

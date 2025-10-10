@@ -7,7 +7,7 @@ u32 extractBits(u32 bits, u32 start, u32 length) {
     assert(end >= start && start + length - 1 <= end);
 
     u32 shifted = bits >> start;
-    u32 mask = static_cast<u64>(1 << length) - 1;
+    u32 mask = (1ULL << length) - 1;
 
     assert((shifted & mask) <= static_cast<u64>(1 << length) - 1);
     return shifted & mask;
