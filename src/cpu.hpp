@@ -95,9 +95,13 @@ struct Cpu {
     u32 nor(const u32 s, const u32 t);
 
 
+    u32 swr(u32 src, const u32 base, const s16 offset);
+
     // Reads the most significant bytes of the source into the least
     // significant bytes of the destination.
     std::tuple<u32, u32> lwr(u32 dst, const u32 base, const s16 offset);
+
+    u32 swl(u32 src, const u32 base, const s16 offset);
 
     // Reads the least significant bytes of the source into the most significant
     // bytes of the destination.

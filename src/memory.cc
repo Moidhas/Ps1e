@@ -237,7 +237,6 @@ void MMap::handleWrite(const PAddress paddr, const u32 value,
     const u32 addr = paddr.m_addr;
 
     assert(isc == 1 || isc == 0);
-    assert(addr % numOfBytes == 0);
     if (addr % numOfBytes != 0) throw COP0::MipsException{COP0::ExcCode::AdES};
 
     if (ramBuffer.range.contains(addr)) {

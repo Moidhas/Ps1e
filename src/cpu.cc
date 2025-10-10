@@ -1,4 +1,5 @@
 #include "cpu.hpp"
+#include <string>
 
 #include "BitUtils.hpp"
 #include "assembler.hpp"
@@ -152,6 +153,16 @@ DecodedOp Cpu::decodePrimary(const u32 opcode, const DecodedOp &prevInstr) {
                     reg.gpr[rs], imm16);
             decodedOp = {
                 .delay = {.value = value, .dstId = static_cast<Id>(rt)}};
+            break;
+        }
+        case SWL: {
+            swl(reg.gpr[rt], reg.gpr[rs], imm16);
+            decodedOp = {};
+            break;
+        }
+        case SWR: {
+            swr(reg.gpr[rt], reg.gpr[rs], imm16);
+            decodedOp = {};
             break;
         }
         case LW: {
@@ -577,7 +588,6 @@ u32 Cpu::j(const u32 currPC, const u32 imm26) {
 
 u32 Cpu::sw(const u32 value, const u32 s, const s16 imm16) {
     const u32 addr = s + imm16;
-    assert(addr % 4 == 0);
     if (cop0.sr.IsC == 1) {
         // println("Ignore store for now need to implement cache for
         // isolation");
@@ -589,7 +599,6 @@ u32 Cpu::sw(const u32 value, const u32 s, const s16 imm16) {
 
 u32 Cpu::sh(const u32 value, const u32 s, const s16 imm16) {
     const u32 addr = s + imm16;
-    assert(addr % 2 == 0);
     if (cop0.sr.IsC == 1) {
         // println("Ignore store for now need to implement cache for
         // isolation");
@@ -639,6 +648,24 @@ u32 Cpu::lui(const u16 imm16) noexcept { return static_cast<u32>(imm16) << 16; }
 
 // Reads the most significant bytes of the source into the least
 // significant bytes of the destination.
+u32 mostToLeast(u32 src, u32 dst, u32 bitLength) {
+    assert(32 - bitLength >= 0);
+    src >>= (32 - bitLength);
+    const u32 mask = ~((1ULL << bitLength) - 1);
+    dst &= mask;
+    return dst | src;
+}
+
+// Reads the least significant bytes of the source into the most significant
+// bytes of the destination.
+u32 leastToMost(u32 src, u32 dst, u32 bitLength) {
+    assert(32 - bitLength >= 0);
+    src <<= (32 - bitLength);
+    const u32 mask = ~(((1ULL << bitLength) - 1) << (32 - bitLength));
+    dst &= mask;
+    return dst | src;
+}
+
 tuple<u32, u32> Cpu::lwr(u32 dst, const u32 base, const s16 offset) {
     const u32 addr = base + offset;
     const u32 wordAddr = (addr / 4) * 4;
@@ -647,28 +674,44 @@ tuple<u32, u32> Cpu::lwr(u32 dst, const u32 base, const s16 offset) {
     assert(addr - wordAddr <= 3);
     assert(32 - bitLength >= 0);
 
-    u32 src = mmap->load32(VAddress{wordAddr});
-    src >>= (32 - bitLength);
-    const u32 mask = ~((1ULL << bitLength) - 1);
-    dst &= mask;
-
-    return {dst | src, addr};
+    const u32 src = mmap->load32(VAddress{wordAddr});
+    return {mostToLeast(src, dst, bitLength), addr};
 }
 
-// Reads the least significant bytes of the source into the most significant
-// bytes of the destination.
+u32 Cpu::swr(u32 src, const u32 base, const s16 offset) {
+    const u32 addr = base + offset;
+    const u32 wordAddr = (addr / 4) * 4;
+    const u32 bitLength = (4 - (addr - wordAddr)) * 8;
+
+    assert(addr - wordAddr <= 3);
+    assert(32 - bitLength >= 0);
+
+    const u32 dst = mmap->load32(VAddress{wordAddr});
+    sw(leastToMost(src, dst, bitLength), wordAddr, 0);
+
+    return addr;
+}
+
+u32 Cpu::swl(u32 src, const u32 base, const s16 offset) {
+    const u32 addr = base + offset;
+    const u32 wordAddr = (addr / 4) * 4;
+    const u32 bitLength = (addr - wordAddr + 1) * 8;
+    assert(32 - bitLength >= 0);
+
+    const u32 dst = mmap->load32(VAddress{wordAddr});
+    sw(mostToLeast(src, dst, bitLength), wordAddr, 0);
+
+    return addr;
+}
+
 tuple<u32, u32> Cpu::lwl(u32 dst, const u32 base, const s16 offset) {
     const u32 addr = base + offset;
     const u32 wordAddr = (addr / 4) * 4;
     const u32 bitLength = (addr - wordAddr + 1) * 8;
     assert(32 - bitLength >= 0);
 
-    u32 src = mmap->load32(VAddress{wordAddr});
-    src <<= (32 - bitLength);
-    const u32 mask = ~(((1ULL << bitLength) - 1) << (32 - bitLength));
-    dst &= mask;
-
-    return {dst | src, addr};
+    const u32 src = mmap->load32(VAddress{wordAddr});
+    return {leastToMost(src, dst, bitLength), addr};
 }
 
 // implicit sign-extension, this does not work in 1's complement.
