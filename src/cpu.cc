@@ -1,5 +1,4 @@
 #include "cpu.hpp"
-#include <string>
 
 #include "BitUtils.hpp"
 #include "assembler.hpp"
@@ -52,6 +51,7 @@ void Cpu::runNextInstr() {
         Kernel::putc(reg.gpr[Id::pc], reg.gpr[Id::t1], reg.gpr[Id::a0]);
         u32 opcode = mmap->load32(VAddress{reg.gpr[Id::pc]});
         DecodedOp decodedOp = decode(opcode, prevDecoded);
+
         reg.gpr[Id::pc] += 4;
         assert(0 <= prevDecoded.delay.dstId &&
                prevDecoded.delay.dstId <= reg.gpr.size());
@@ -70,12 +70,17 @@ void Cpu::runNextInstr() {
 
 void Cpu::handleMipsException(const COP0::MipsException &e, bool BD) {
     assert(reg.gpr[Id::pc] >= 4);
+    assert(BD == false);
 
     cop0.epc = BD ? reg.gpr[Id::pc] - 4 : reg.gpr[Id::pc];
     cop0.cause.ExcCode = static_cast<u32>(e.code);
     cop0.cause.BD = BD;
 
-    cop0.sr.data = cop0.srStackPush(true, false);
+    u32 mask = 0b111111;
+    u32 mode = cop0.sr.data & mask;
+    cop0.sr.data &= ~mask;
+    cop0.sr.data |= (mode << 2) & mask;
+
     reg.gpr[Id::pc] = cop0.sr.BEV ? 0xbfc00180 : 0x80000080;
 }
 
@@ -283,7 +288,7 @@ DecodedOp Cpu::handleJumpOp(const JumpOp jumpOp, const u32 opcode) {
 
     switch (jumpOp) {
         case JALR:
-            assert(rs != rd);
+            // assert(rs != rd);
             decodedOp = {.instr = {.value = pcAfterDelaySlot,
                                    .dstId = static_cast<Id>(rd)},
                          .delay = {.value = jr(reg.gpr[rs]), .dstId = Id::pc}};
@@ -361,6 +366,7 @@ DecodedOp Cpu::handleCOP0(const u8 rs, const u8 rt, const u8 rd,
             debug.coprd = decodedOp.delay.value;
             break;
         case MTC0:
+            // println("cop0#{} <- {:#x}", rd, reg.gpr[rt]);
             cop0[rd] = reg.gpr[rt];
             break;
         case RFE:
@@ -507,6 +513,9 @@ DecodedOp Cpu::decodeSecondary(const u32 opcode) {
         case SYSCALL:
             syscall();
             break;
+        case BREAK:
+            breakCall();
+            break;
         default:
             throw runtime_error{format(
                 "Invalid opcode/Not implemented Yet: {:032b}, "
@@ -519,6 +528,7 @@ DecodedOp Cpu::decodeSecondary(const u32 opcode) {
     return decodedOp.withDebug(debug);
 }
 
+void Cpu::breakCall() { throw COP0::MipsException{COP0::ExcCode::Bp}; }
 void Cpu::syscall() { throw COP0::MipsException{COP0::ExcCode::Syscall}; }
 
 // C++ Trivia: you won't get sign extension if you cast from u32 to s64
@@ -575,10 +585,7 @@ optional<u32> Cpu::branchCMPHelper(const u32 currPC, const s16 offset,
     return {};
 }
 
-u32 Cpu::jr(const u32 s) {
-    assert(s % 4 == 0);
-    return s;
-}
+u32 Cpu::jr(const u32 s) { return s; }
 
 u32 Cpu::j(const u32 currPC, const u32 imm26) {
     assert(imm26 <= (1 << 26) - 1);

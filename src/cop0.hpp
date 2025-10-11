@@ -131,8 +131,6 @@ struct COP0 {
 
     u32 &operator[](const u32 idx);
 
-    u32 srStackPush(bool isKernalMode, bool isInterruptEnabled);
-
     u32 srStackPop();
 };
 }  // namespace COP0

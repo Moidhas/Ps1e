@@ -53,6 +53,7 @@ struct Cpu {
     DecodedOp decodeSecondary(const u32 opcode);
 
     void syscall();
+    void breakCall();
 
     std::tuple<u32, u32> mult(s32 s, s32 t);
     std::tuple<u32, u32> multu(u64 s, u64 t);

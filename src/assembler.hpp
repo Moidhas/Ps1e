@@ -235,6 +235,7 @@ struct DebugInfo {
             case XOR:
             case NOR:
             case ADD:
+            case BREAK:
                 out = std::format_to(out,
                                      "rd=${}={:#X}, rs=${}={:#X}, rt=${}={:#X}",
                                      rd, d, rs, s, rt, t);
