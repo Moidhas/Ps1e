@@ -47,12 +47,14 @@ void Cpu::runNextInstr() {
             reg.gpr[Id::sp] = hreg.sp == 0 ? reg.gpr[Id::sp] : hreg.sp;
         }
 
+
         mmap->isc = cop0.sr.IsC;
         Kernel::putc(reg.gpr[Id::pc], reg.gpr[Id::t1], reg.gpr[Id::a0]);
         u32 opcode = mmap->load32(VAddress{reg.gpr[Id::pc]});
         DecodedOp decodedOp = decode(opcode, prevDecoded);
 
-        if (prevDecoded.delay.dstId == decodedOp.delay.dstId) prevDecoded.delay.dstId = Id::zero;
+        if (prevDecoded.delay.dstId == decodedOp.delay.dstId)
+            prevDecoded.delay.dstId = Id::zero;
 
         reg.gpr[Id::pc] += 4;
         assert(0 <= prevDecoded.delay.dstId &&
@@ -120,7 +122,7 @@ DecodedOp Cpu::decodePrimary(const u32 opcode, const DecodedOp &prevInstr) {
     using enum PrimaryOps;
     switch (static_cast<PrimaryOps>(primaryOp)) {
         case BCONDZ:
-            return handleJumpOp(static_cast<JumpOp>(rt), opcode);
+            return handleJumpOp(static_cast<JumpOp>(rt & 0b10001), opcode);
             break;
         case BLEZ:
         case BGTZ:
