@@ -1,15 +1,18 @@
-lw $1 0($0) // Asume word 0 contains 0
-addi $1 $0 10
-// The next instruction $1 == 10  this is because of forwarding.
+ASSUME NO STALLS.
 
-lw $1 0($0)
-lw $1 0($2) 
-addi $1 $1 10 // this will use the first load instruction, and get rid of the previous load.
+lw $1 0($0) // Asume word 0 contains 0 // WB
+addi $1 $0 10  // MEM
+// The next instruction $1 == 10  this is because of forwarding. // EXE
 
-So assuming the instruction in the delay slot doesn't write to the register
-the value of the instruction before the load delay slot is used.
+lw $1 0($0) // WB
+lw $1 0($2) // MEM
+addi $1 $1 10 // EXE
+// Because of the forwarding unit, the EXE/MEM pipeline register will be prioritized over THE MEM/WB pipeline register.
+// So the addi will use the value of $1 before it is changed by lw's.
 
-Notes:
+So no matter what, if you have an instruction in the load delay slot that writes to the same register being written to, 
+then that load instruction WILL NOT TAKE EFFECT.
+
 Although special hardware ensures that a nop is not required between
 the lwl and lwr, there is still a load delay between the second of them
-and a normal instruction.
+and a normal instruction. It's treated as if consecutive lwl, lwr are one lw.

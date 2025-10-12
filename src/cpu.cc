@@ -52,6 +52,8 @@ void Cpu::runNextInstr() {
         u32 opcode = mmap->load32(VAddress{reg.gpr[Id::pc]});
         DecodedOp decodedOp = decode(opcode, prevDecoded);
 
+        if (prevDecoded.delay.dstId == decodedOp.delay.dstId) prevDecoded.delay.dstId = Id::zero;
+
         reg.gpr[Id::pc] += 4;
         assert(0 <= prevDecoded.delay.dstId &&
                prevDecoded.delay.dstId <= reg.gpr.size());
