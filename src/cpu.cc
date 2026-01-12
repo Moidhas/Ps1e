@@ -53,11 +53,6 @@ void Cpu::runNextInstr() {
         u32 opcode = mmap->load32(VAddress{reg.gpr[Id::pc]});
         DecodedOp decodedOp = decode(opcode, prevDecoded);
 
-        if (0x800d5950 <= reg.pc() && reg.pc() <= 0x800d59a8)
-            flag = true;
-
-        // if (flag) println("{}", decodedOp);
-
         if (prevDecoded.delay.dstId == decodedOp.delay.dstId)
             prevDecoded.delay.dstId = Id::zero;
 
@@ -76,6 +71,7 @@ void Cpu::runNextInstr() {
         handleMipsException(e, BD);
     }
 }
+
 
 void Cpu::handleMipsException(const COP0::MipsException &e, bool BD) {
     assert(reg.gpr[Id::pc] >= 4);

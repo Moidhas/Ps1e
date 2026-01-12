@@ -26,7 +26,6 @@ struct Registers {
 struct Cpu {
     constexpr static u32 RESET_VECTOR = 0xBFC00000;
 
-    bool flag{false};
     Registers reg;
     COP0::COP0 cop0;
     MMap *mmap;
@@ -38,6 +37,7 @@ struct Cpu {
     void runCpuLoop();
 
     void runNextInstr();
+    void updateState();
 
     void handleMipsException(const COP0::MipsException &e, bool BD);
 
