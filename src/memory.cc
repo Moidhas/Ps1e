@@ -284,7 +284,6 @@ u32 bufrd(const span<u8> bufr, u32 idx, const u8 numOfBytes) {
     return accBytes;
 }
 
-
 HeaderReg MMap::sideload() {
     struct stat info;
     stat("./tests/psxtest_cpu.exe", &info);

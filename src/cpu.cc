@@ -47,11 +47,15 @@ void Cpu::runNextInstr() {
             reg.gpr[Id::sp] = hreg.sp == 0 ? reg.gpr[Id::sp] : hreg.sp;
         }
 
-
         mmap->isc = cop0.sr.IsC;
         Kernel::putc(reg.gpr[Id::pc], reg.gpr[Id::t1], reg.gpr[Id::a0]);
         u32 opcode = mmap->load32(VAddress{reg.gpr[Id::pc]});
         DecodedOp decodedOp = decode(opcode, prevDecoded);
+
+        if (0x800d5950 <= reg.pc() && reg.pc() <= 0x800d59a8)
+            flag = true;
+
+        // if (flag) println("{}", decodedOp);
 
         if (prevDecoded.delay.dstId == decodedOp.delay.dstId)
             prevDecoded.delay.dstId = Id::zero;
@@ -122,6 +126,7 @@ DecodedOp Cpu::decodePrimary(const u32 opcode, const DecodedOp &prevInstr) {
     using enum PrimaryOps;
     switch (static_cast<PrimaryOps>(primaryOp)) {
         case BCONDZ:
+            // the & is to support unoffical branch opcodes.
             return handleJumpOp(static_cast<JumpOp>(rt & 0b10001), opcode);
             break;
         case BLEZ:
