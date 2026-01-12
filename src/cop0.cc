@@ -3,27 +3,27 @@
 namespace COP0 {
 u32 &COP0::operator[](const u32 idx) {
     switch (idx) {
-        case BPC:
+        case BPC_IDX:
             return bpc;
-        case BDA:
+        case BDA_IDX:
             return bda;
-        case TAR:
+        case TAR_IDX:
             return tar;
-        case DCIC:
+        case DCIC_IDX:
             return dcic;
-        case BadA:
+        case BadA_IDX:
             return bada;
-        case BDAM:
+        case BDAM_IDX:
             return bdam;
-        case BPCM:
+        case BPCM_IDX:
             return bpcm;
-        case SR:
+        case SR_IDX:
             return sr.data;
-        case CAUSE:
+        case CAUSE_IDX:
             return cause.data;
-        case EPC:
+        case EPC_IDX:
             return epc;
-        case PRID:
+        case PRID_IDX:
             return prid;
         default:
             assert(false);

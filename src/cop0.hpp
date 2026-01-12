@@ -116,17 +116,17 @@ struct COP0 {
     u32 prid;     // Processor Revision Identifier
 
     enum IDX {
-        BPC = 3,
-        BDA = 5,
-        TAR = 6,
-        DCIC = 7,
-        BadA = 8,
-        BDAM = 9,
-        BPCM = 11,
-        SR = 12,
-        CAUSE = 13,
-        EPC = 14,
-        PRID = 15,
+        BPC_IDX = 3,
+        BDA_IDX = 5,
+        TAR_IDX = 6,
+        DCIC_IDX = 7,
+        BadA_IDX = 8,
+        BDAM_IDX = 9,
+        BPCM_IDX = 11,
+        SR_IDX = 12,
+        CAUSE_IDX = 13,
+        EPC_IDX = 14,
+        PRID_IDX = 15,
     };
 
     u32 &operator[](const u32 idx);

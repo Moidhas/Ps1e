@@ -7,11 +7,11 @@ TEST := ./tests/test.cc
 .PHONY: clean, test
 
 ${EXE}: ${SRC}
-	g++ ${SRC} -std=c++23 -g -Wall -o ${EXE}
+	g++-15 ${SRC} -std=c++23 -g -Wall -o ${EXE}
 
 test: ${TEST_EXE}
 ${TEST_EXE}: ${TEST_SRC} ${TEST}
-	g++ ${TEST_SRC} ${TEST} -std=c++23 -g -Wall -o ${TEST_EXE}
+	g++-15 ${TEST_SRC} ${TEST} -std=c++23 -g -Wall -o ${TEST_EXE}
 
 clean:
 	rm -rf ${EXE} ${EXE}.dSYM ${TEST_EXE} ${TEST_EXE}.dSYM
