@@ -4,6 +4,7 @@
 #include "assembler.hpp"
 #include "cop0.hpp"
 #include "memory.hpp"
+#include "climits"
 
 using namespace std;
 using namespace Opcode;
