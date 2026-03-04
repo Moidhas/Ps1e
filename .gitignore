@@ -1,5 +1,3 @@
 *.BIN
 BIOS/*
-Build/*
-amidog/*
-ps1G.*
+*.out

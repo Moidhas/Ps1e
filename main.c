@@ -13,15 +13,16 @@
 typedef uint32_t u32;
 typedef uint16_t u16;
 typedef uint8_t u8;
-typedef int32_t s32;
-typedef int16_t s16;
-typedef int8_t s8;
+typedef int32_t i32;
+typedef int16_t i16;
+typedef int8_t i8;
 
 #define RESET_EXCEPTION_VECTOR 0xBFC00000
 #define BIOS_PATH "./BIOS/SCPH1001.BIN"
 #define GPR_SIZE 32
 #define GET_PRIMARY(opcode) ((opcode) >> 26)
-#define GET_SECONDARY(opcode) ((opcode) & 0x1F)
+#define GET_SECONDARY(opcode) ((opcode) & 0x3F)
+#define GET_IMM26(opcode) ((opcode) & 0x3FFFFFF)
 #define GET_IMM16(opcode) ((opcode) & 0xFFFF)
 #define GET_IMM5(opcode) (((opcode) >> 6) & 0x1F)
 #define GET_RD(opcode) (((opcode) >> 11) & 0x1F)
@@ -75,7 +76,9 @@ struct psx {
         };
     };
 
-    u8* bios; /* this is little endian, and m1 chip is also little endian. */
+    u32 next_pc;
+
+    u8 *bios; /* this is little endian, and m1 chip is also little endian. */
 };
 
 // enum psx_error {
@@ -88,34 +91,197 @@ struct psx {
 // enum psx_error (*actv_pinstr[])(struct psx*) = {
 // };
 
-void sll(struct psx* psx, u32 opcode) {
-    assert(GET_RD(opcode) < GPR_SIZE);
+void sll(struct psx *psx, u32 opcode)
+{
     psx->regs[GET_RD(opcode)] = GET_RT(opcode) << GET_IMM5(opcode);
 }
 
-void lui(struct psx* psx, u32 opcode) {
-    assert(GET_RT(opcode) < GPR_SIZE);
+void lui(struct psx *psx, u32 opcode)
+{
     psx->regs[GET_RT(opcode)] = opcode << 16;
 }
 
-void start(struct psx* psx) {
-    u32 opcode = ((u32*)psx->bios)[8]; /* macbook m1 chip is little endian */
-    printf("0x%08x\n", opcode);
-    printf("primary: 0x%02x, secondary: 0x%02x\n", GET_PRIMARY(opcode),
-           GET_SECONDARY(opcode));
-    assert(false);
-
-    /* 
-     * lw:
-     *   loadword stuff
-     *   load delay slot stuff
-     *   branch delay slot stuff
-     *   update slot stuff
-     *   goto next instruction
-     */
+void j(struct psx *psx, u32 opcode)
+{
+    psx->next_pc = (psx->pc & 0xF0000000) + (GET_IMM26(opcode) << 2);
 }
 
-int main() {
+void addiu(struct psx *psx, u32 opcode)
+{
+    psx->regs[GET_RT(opcode)] =
+        psx->regs[GET_RS(opcode)] + (i32)GET_IMM16(opcode);
+}
+
+void addu(struct psx *psx, u32 opcode)
+{
+    psx->regs[GET_RD(opcode)] =
+        psx->regs[GET_RS(opcode)] + psx->regs[GET_RT(opcode)];
+}
+
+void start(struct psx *psx)
+{
+    /*
+     * instead of making seperate dispatch tables I could just come up with a
+     * way to merge the primary and secondary opcodes, this would help with
+     * increasing branch prediction.
+     */
+    static void *dispatch_tbl[] = {
+        &&h_na,   &&h_bcondz, &&h_j,    &&h_jal,   &&h_beq,  &&h_bne,
+        &&h_blez, &&h_bgtz,   &&h_addi, &&h_addiu, &&h_slti, &&h_sltiu,
+        &&h_andi, &&h_ori,    &&h_xori, &&h_lui,   &&h_cop0, &&h_cop1,
+        &&h_cop2, &&h_cop3,   &&h_na,   &&h_na,    &&h_na,   &&h_na,
+        &&h_na,   &&h_na,     &&h_na,   &&h_na,    &&h_na,   &&h_na,
+        &&h_na,   &&h_na,     &&h_lb,   &&h_lh,    &&h_lwl,  &&h_lw,
+        &&h_lbu,  &&h_lhu,    &&h_lwr,  &&h_na,    &&h_sb,   &&h_sh,
+        &&h_swl,  &&h_sw,     &&h_na,   &&h_na,    &&h_swr,  &&h_na,
+        &&h_lwc0, &&h_lwc1,   &&h_lwc2, &&h_lwc3,  &&h_na,   &&h_na,
+        &&h_na,   &&h_na,     &&h_swc0, &&h_swc1,  &&h_swc2, &&h_swc3,
+        &&h_na,   &&h_na,     &&h_na,   &&h_na,
+    };
+
+    static void *sp_dispatch_tbl[] = {
+        &&h_sll,     &&h_na,    &&h_srl, &&h_sra,  &&h_sllv, &&h_na,
+        &&h_srlv,    &&h_srav,  &&h_jr,  &&h_jalr, &&h_na,   &&h_na,
+        &&h_syscall, &&h_break, &&h_na,  &&h_na,   &&h_mfhi, &&h_mthi,
+        &&h_mflo,    &&h_mtlo,  &&h_na,  &&h_na,   &&h_na,   &&h_na,
+        &&h_mult,    &&h_multu, &&h_div, &&h_divu, &&h_na,   &&h_na,
+        &&h_na,      &&h_na,    &&h_add, &&h_addu, &&h_sub,  &&h_subu,
+        &&h_and,     &&h_or,    &&h_xor, &&h_nor,  &&h_na,   &&h_na,
+        &&h_slt,     &&h_sltu,  &&h_na,  &&h_na,   &&h_na,   &&h_na,
+        &&h_na,      &&h_na,    &&h_na,  &&h_na,   &&h_na,   &&h_na,
+        &&h_na,      &&h_na,    &&h_na,  &&h_na,   &&h_na,   &&h_na,
+        &&h_na,      &&h_na,    &&h_na,  &&h_na,
+    };
+
+    u32 opcode = 0;
+    psx->pc = RESET_EXCEPTION_VECTOR;
+    psx->next_pc = psx->pc + 4;
+
+#define DISPATCH()                                                             \
+    opcode =                                                                   \
+        ((u32 *)psx->bios)[psx->pc -                                           \
+                           RESET_EXCEPTION_VECTOR]; /* m1 is little endian */  \
+    printf("pc: 0x%08x, opcode: 0x%08x, primary: 0x%02x, secondary: 0x%02x\n", \
+           psx->pc, opcode, GET_PRIMARY(opcode), GET_SECONDARY(opcode));       \
+    assert(GET_PRIMARY(opcode) <                                               \
+           sizeof(dispatch_tbl) / sizeof(dispatch_tbl[0]));                    \
+    if (GET_PRIMARY(opcode) != 0) {                                            \
+        goto *dispatch_tbl[GET_PRIMARY(opcode)];                               \
+    } else {                                                                   \
+        assert(GET_SECONDARY(opcode) <                                         \
+               sizeof(sp_dispatch_tbl) / sizeof(sp_dispatch_tbl[0]));          \
+        goto *sp_dispatch_tbl[GET_SECONDARY(opcode)];                          \
+    }
+
+    DISPATCH();
+
+h_bcondz:
+    assert(false);
+h_j:
+    psx->pc = psx->next_pc;
+    j(psx, opcode);
+    DISPATCH();
+h_jal:
+    assert(false);
+h_beq:
+    assert(false);
+h_bne:
+    assert(false);
+h_blez:
+    assert(false);
+h_bgtz:
+    assert(false);
+h_addi:
+    assert(false);
+h_addiu:
+    psx->pc = psx->next_pc;
+    psx->next_pc += 4;
+    addiu(psx, opcode);
+    DISPATCH();
+h_slti:
+    assert(false);
+h_sltiu:
+    assert(false);
+h_andi:
+    assert(false);
+h_ori:
+    assert(false);
+h_xori:
+    assert(false);
+h_lui:
+    psx->pc = psx->next_pc;
+    psx->next_pc += 4;
+    lui(psx, opcode);
+    DISPATCH();
+h_cop0:
+h_cop1:
+h_cop2:
+h_cop3:
+h_lb:
+h_lh:
+h_lwl:
+h_lw:
+h_lbu:
+h_lhu:
+h_lwr:
+h_sb:
+h_sh:
+h_swl:
+h_sw:
+h_swr:
+h_lwc0:
+h_lwc1:
+h_lwc2:
+h_lwc3:
+h_swc0:
+h_swc1:
+h_swc2:
+h_swc3:
+    assert(false);
+/* special */
+h_sll:
+    psx->pc = psx->next_pc;
+    psx->next_pc += 4;
+    sll(psx, opcode);
+    DISPATCH();
+h_srl:
+h_sra:
+h_sllv:
+h_srlv:
+h_srav:
+h_jr:
+h_jalr:
+h_syscall:
+h_break:
+h_mfhi:
+h_mthi:
+h_mflo:
+h_mtlo:
+h_mult:
+h_multu:
+h_div:
+h_divu:
+h_add:
+    assert(false);
+h_addu:
+    psx->pc = psx->next_pc;
+    psx->next_pc += 4;
+    addu(psx, opcode);
+    DISPATCH();
+h_sub:
+h_subu:
+h_and:
+h_or:
+h_xor:
+h_nor:
+h_slt:
+h_sltu:
+h_na:
+    assert(false);
+}
+
+int main()
+{
     int fd = open(BIOS_PATH, O_RDONLY);
 
     if (fd < 0) {
@@ -129,7 +295,14 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-    u8* bios = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    /*
+     * what is stopping me from calling mmap for the entire memory space of the
+     * psx. At the end of the day the only memory that will be used is for the
+     * pte, until a page fault happens, addressing would become more natural
+     * where the pc is always relative to where the kernel decided the base
+     * address will be. how will mmaped io work?
+     */
+    u8 *bios = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
 
     if (bios == MAP_FAILED) {
