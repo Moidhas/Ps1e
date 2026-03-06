@@ -78,7 +78,7 @@ struct psx {
 
     u32 next_pc;
 
-    u8 *bios; /* this is little endian, and m1 chip is also little endian. */
+    u8 *addr; /* this is little endian, and m1 chip is also little endian. */
 };
 
 // enum psx_error {
@@ -158,9 +158,7 @@ void start(struct psx *psx)
     psx->next_pc = psx->pc + 4;
 
 #define DISPATCH()                                                             \
-    opcode =                                                                   \
-        ((u32 *)psx->bios)[psx->pc -                                           \
-                           RESET_EXCEPTION_VECTOR]; /* m1 is little endian */  \
+    opcode = *((u32 *)&psx->addr[psx->pc]); /* m1 is little endian */            \
     printf("pc: 0x%08x, opcode: 0x%08x, primary: 0x%02x, secondary: 0x%02x\n", \
            psx->pc, opcode, GET_PRIMARY(opcode), GET_SECONDARY(opcode));       \
     assert(GET_PRIMARY(opcode) <                                               \
@@ -178,6 +176,7 @@ void start(struct psx *psx)
 h_bcondz:
     assert(false);
 h_j:
+    assert(false);
     psx->pc = psx->next_pc;
     j(psx, opcode);
     DISPATCH();
@@ -194,6 +193,7 @@ h_bgtz:
 h_addi:
     assert(false);
 h_addiu:
+    assert(false);
     psx->pc = psx->next_pc;
     psx->next_pc += 4;
     addiu(psx, opcode);
@@ -240,6 +240,7 @@ h_swc3:
     assert(false);
 /* special */
 h_sll:
+    assert(false);
     psx->pc = psx->next_pc;
     psx->next_pc += 4;
     sll(psx, opcode);
@@ -264,6 +265,7 @@ h_divu:
 h_add:
     assert(false);
 h_addu:
+    assert(false);
     psx->pc = psx->next_pc;
     psx->next_pc += 4;
     addu(psx, opcode);
@@ -295,15 +297,17 @@ int main()
         exit(EXIT_FAILURE);
     }
 
-    /*
-     * what is stopping me from calling mmap for the entire memory space of the
-     * psx. At the end of the day the only memory that will be used is for the
-     * pte, until a page fault happens, addressing would become more natural
-     * where the pc is always relative to where the kernel decided the base
-     * address will be. how will mmaped io work?
-     */
-    u8 *bios = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
+    /* allocates entire psx address space */
+    u8 *addr = mmap(NULL, 0x100000000, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANON, -1, 0);
+
+    if (addr == MAP_FAILED) {
+        fprintf(stderr, "error mmap address space: %d\n", errno);
+        exit(EXIT_FAILURE);
+    }
+
+    u8 *bios = mmap(addr + RESET_EXCEPTION_VECTOR, st.st_size, PROT_READ,
+                    MAP_PRIVATE | MAP_FIXED, fd, 0);
 
     if (bios == MAP_FAILED) {
         fprintf(stderr, "error mmap bios: %d\n", errno);
@@ -311,7 +315,7 @@ int main()
     }
 
     struct psx psx;
-    psx.bios = bios;
+    psx.addr = addr;
     start(&psx);
 
     if (munmap(bios, st.st_size) < 0) {
