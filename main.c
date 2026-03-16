@@ -1,10 +1,13 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <mach/mach.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/fileport.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -17,13 +20,27 @@ typedef int32_t i32;
 typedef int16_t i16;
 typedef int8_t i8;
 
+size_t get_page_size()
+{
+    static size_t page_size = 0;
+    if (page_size == 0) {
+        page_size = sysconf(_SC_PAGESIZE);
+    }
+    return page_size;
+}
+
+/* since the psx uses 32 bit addresses, total address space is 2^32 */
+#define ADDR_SPACE_SIZE 0x100000000
+
 #define RESET_EXCEPTION_VECTOR 0xBFC00000
 #define BIOS_PATH "./BIOS/SCPH1001.BIN"
 #define GPR_SIZE 32
+/* for all macros assumption opcode is sizeof(u32) bytes */
 #define GET_PRIMARY(opcode) ((opcode) >> 26)
 #define GET_SECONDARY(opcode) ((opcode) & 0x3F)
 #define GET_IMM26(opcode) ((opcode) & 0x3FFFFFF)
-#define GET_IMM16(opcode) ((opcode) & 0xFFFF)
+#define GET_UIMM16(opcode) ((opcode) & 0xFFFF)      /* Unsigned */
+#define GET_SIMM16(opcode) (i16)((opcode) & 0xFFFF) /* Signed */
 #define GET_IMM5(opcode) (((opcode) >> 6) & 0x1F)
 #define GET_RD(opcode) (((opcode) >> 11) & 0x1F)
 #define GET_RT(opcode) (((opcode) >> 16) & 0x1F)
@@ -75,7 +92,6 @@ struct psx {
                        accessed by opcodes) */
         };
     };
-
     u32 next_pc;
 
     u8 *addr; /* this is little endian, and m1 chip is also little endian. */
@@ -108,8 +124,7 @@ void j(struct psx *psx, u32 opcode)
 
 void addiu(struct psx *psx, u32 opcode)
 {
-    psx->regs[GET_RT(opcode)] =
-        psx->regs[GET_RS(opcode)] + (i32)GET_IMM16(opcode);
+    psx->regs[GET_RT(opcode)] = psx->regs[GET_RS(opcode)] + GET_SIMM16(opcode);
 }
 
 void addu(struct psx *psx, u32 opcode)
@@ -118,13 +133,48 @@ void addu(struct psx *psx, u32 opcode)
         psx->regs[GET_RS(opcode)] + psx->regs[GET_RT(opcode)];
 }
 
+void ori(struct psx *psx, u32 opcode)
+{
+    psx->regs[GET_RT(opcode)] = psx->regs[GET_RS(opcode)] | GET_UIMM16(opcode);
+}
+
+void sw(struct psx *psx, u32 opcode)
+{
+    /* has to be 4 bytes aligned */
+    assert((psx->regs[GET_RS(opcode)] + GET_SIMM16(opcode)) % sizeof(u32) == 0);
+
+    printf("\t storing memory at: 0x%08x, value: 0x%08x\n",
+           psx->regs[GET_RS(opcode)] + GET_SIMM16(opcode),
+           psx->regs[GET_RT(opcode)]);
+
+    /* assuming machine is little endian */
+    u32 *addr =
+        (u32 *)&psx->addr[psx->regs[GET_RS(opcode)] + GET_SIMM16(opcode)];
+    addr[0] = psx->regs[GET_RT(opcode)];
+}
+
+void lhu(struct psx *psx, u32 opcode)
+{
+    /* has to be 2 bytes aligned */
+    assert((GET_SIMM16(opcode) + psx->regs[GET_RS(opcode)]) % sizeof(u16) == 0);
+
+    printf("\t loading memory at: 0x%08x, value: 0x%08x\n",
+           GET_SIMM16(opcode) + psx->regs[GET_RS(opcode)],
+           *(u16 *)&psx->addr[GET_SIMM16(opcode) + psx->regs[GET_RS(opcode)]]);
+
+    /* assuming machine is little endian */
+    psx->regs[GET_RT(opcode)] =
+        *(u16 *)&psx->addr[GET_SIMM16(opcode) + psx->regs[GET_RS(opcode)]];
+}
+
+void or(struct psx *psx, u32 opcode)
+{
+    psx->regs[GET_RD(opcode)] =
+        psx->regs[GET_RS(opcode)] | psx->regs[GET_RT(opcode)];
+}
+
 void start(struct psx *psx)
 {
-    /*
-     * instead of making seperate dispatch tables I could just come up with a
-     * way to merge the primary and secondary opcodes, this would help with
-     * increasing branch prediction.
-     */
     static void *dispatch_tbl[] = {
         &&h_na,   &&h_bcondz, &&h_j,    &&h_jal,   &&h_beq,  &&h_bne,
         &&h_blez, &&h_bgtz,   &&h_addi, &&h_addiu, &&h_slti, &&h_sltiu,
@@ -158,25 +208,28 @@ void start(struct psx *psx)
     psx->next_pc = psx->pc + 4;
 
 #define DISPATCH()                                                             \
-    opcode = *((u32 *)&psx->addr[psx->pc]); /* m1 is little endian */            \
-    printf("pc: 0x%08x, opcode: 0x%08x, primary: 0x%02x, secondary: 0x%02x\n", \
-           psx->pc, opcode, GET_PRIMARY(opcode), GET_SECONDARY(opcode));       \
-    assert(GET_PRIMARY(opcode) <                                               \
-           sizeof(dispatch_tbl) / sizeof(dispatch_tbl[0]));                    \
-    if (GET_PRIMARY(opcode) != 0) {                                            \
-        goto *dispatch_tbl[GET_PRIMARY(opcode)];                               \
-    } else {                                                                   \
-        assert(GET_SECONDARY(opcode) <                                         \
-               sizeof(sp_dispatch_tbl) / sizeof(sp_dispatch_tbl[0]));          \
-        goto *sp_dispatch_tbl[GET_SECONDARY(opcode)];                          \
-    }
+    do {                                                                       \
+        assert(psx->zero == 0);                                                \
+        opcode = *((u32 *)&psx->addr[psx->pc]); /* m1 is little endian */      \
+        printf("pc: 0x%08x, opcode: 0x%08x, primary: 0x%02x, secondary: "      \
+               "0x%02x\n",                                                     \
+               psx->pc, opcode, GET_PRIMARY(opcode), GET_SECONDARY(opcode));   \
+        assert(GET_PRIMARY(opcode) <                                           \
+               sizeof(dispatch_tbl) / sizeof(dispatch_tbl[0]));                \
+        if (GET_PRIMARY(opcode) != 0) {                                        \
+            goto *dispatch_tbl[GET_PRIMARY(opcode)];                           \
+        } else {                                                               \
+            assert(GET_SECONDARY(opcode) <                                     \
+                   sizeof(sp_dispatch_tbl) / sizeof(sp_dispatch_tbl[0]));      \
+            goto *sp_dispatch_tbl[GET_SECONDARY(opcode)];                      \
+        }                                                                      \
+    } while (0)
 
     DISPATCH();
 
 h_bcondz:
     assert(false);
 h_j:
-    assert(false);
     psx->pc = psx->next_pc;
     j(psx, opcode);
     DISPATCH();
@@ -193,7 +246,6 @@ h_bgtz:
 h_addi:
     assert(false);
 h_addiu:
-    assert(false);
     psx->pc = psx->next_pc;
     psx->next_pc += 4;
     addiu(psx, opcode);
@@ -205,7 +257,10 @@ h_sltiu:
 h_andi:
     assert(false);
 h_ori:
-    assert(false);
+    psx->pc = psx->next_pc;
+    psx->next_pc += 4;
+    ori(psx, opcode);
+    DISPATCH();
 h_xori:
     assert(false);
 h_lui:
@@ -223,11 +278,20 @@ h_lwl:
 h_lw:
 h_lbu:
 h_lhu:
+    assert(false);
+    psx->pc = psx->next_pc;
+    psx->next_pc += 4;
+    lhu(psx, opcode);
+    DISPATCH();
 h_lwr:
 h_sb:
 h_sh:
 h_swl:
 h_sw:
+    psx->pc = psx->next_pc;
+    psx->next_pc += 4;
+    sw(psx, opcode);
+    DISPATCH();
 h_swr:
 h_lwc0:
 h_lwc1:
@@ -240,7 +304,6 @@ h_swc3:
     assert(false);
 /* special */
 h_sll:
-    assert(false);
     psx->pc = psx->next_pc;
     psx->next_pc += 4;
     sll(psx, opcode);
@@ -274,52 +337,59 @@ h_sub:
 h_subu:
 h_and:
 h_or:
+    psx->pc = psx->next_pc;
+    psx->next_pc += 4;
+    or(psx, opcode);
+    DISPATCH();
 h_xor:
 h_nor:
 h_slt:
 h_sltu:
 h_na:
     assert(false);
+
+#undef DISPATCH
 }
 
-int main()
+/* allocates psx address space, setups mirroring and protections. */
+void *psx_alloc_addr_space()
 {
-    int fd = open(BIOS_PATH, O_RDONLY);
+#define CHECK_ERR(expr, fstr, fmt)                                             \
+    do {                                                                       \
+        if (expr) {                                                            \
+            fprintf(stderr, fstr, fmt);                                        \
+            exit(EXIT_FAILURE);                                                \
+        }                                                                      \
+    } while (0)
 
-    if (fd < 0) {
-        fprintf(stderr, "error opening bios: %d\n", errno);
-        exit(EXIT_FAILURE);
-    }
+    u8 *addr = mmap(NULL, ADDR_SPACE_SIZE, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANON, -1, 0);
+    CHECK_ERR(addr == MAP_FAILED, "error allocating addr space: %d\n", errno);
+
+    int fd = open(BIOS_PATH, O_RDONLY);
+    CHECK_ERR(fd < 0, "error opening bios: %d\n", errno);
 
     struct stat st;
-    if (fstat(fd, &st) < 0) {
-        fprintf(stderr, "error stats bios: %d\n", errno);
-        exit(EXIT_FAILURE);
-    }
+    CHECK_ERR(fstat(fd, &st) < 0, "error stats bios: %d\n", errno);
 
-    /* allocates entire psx address space */
-    u8 *addr = mmap(NULL, 0x100000000, PROT_READ | PROT_WRITE,
-                    MAP_PRIVATE | MAP_ANON, -1, 0);
-
-    if (addr == MAP_FAILED) {
-        fprintf(stderr, "error mmap address space: %d\n", errno);
-        exit(EXIT_FAILURE);
-    }
+    assert(((uintptr_t)addr + RESET_EXCEPTION_VECTOR) % get_page_size() == 0);
+    assert(st.st_size % get_page_size() == 0);
 
     u8 *bios = mmap(addr + RESET_EXCEPTION_VECTOR, st.st_size, PROT_READ,
                     MAP_PRIVATE | MAP_FIXED, fd, 0);
 
-    if (bios == MAP_FAILED) {
-        fprintf(stderr, "error mmap bios: %d\n", errno);
-        exit(EXIT_FAILURE);
-    }
+    CHECK_ERR(bios == MAP_FAILED, "error allocating bios space: %d\n", errno);
 
+    close(fd);
+    return (void *)addr;
+#undef CHECK_ERR
+}
+
+int main()
+{
     struct psx psx;
-    psx.addr = addr;
+    memset(&psx, 0, sizeof(psx));
+    psx.addr = psx_alloc_addr_space();
     start(&psx);
-
-    if (munmap(bios, st.st_size) < 0) {
-        fprintf(stderr, "error munmap bios: %d\n", errno);
-        exit(EXIT_FAILURE);
-    }
+    vm_deallocate(mach_task_self(), (vm_address_t)psx.addr, ADDR_SPACE_SIZE);
 }
