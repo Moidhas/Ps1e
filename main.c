@@ -20,6 +20,11 @@ typedef int32_t i32;
 typedef int16_t i16;
 typedef int8_t i8;
 
+/* all of these are in bytes. */
+#define KB (1 << 10)
+#define MB (1 << 20)
+#define GB (1 << 30)
+
 size_t get_page_size()
 {
     static size_t page_size = 0;
@@ -31,11 +36,14 @@ size_t get_page_size()
 
 /* since the psx uses 32 bit addresses, total address space is 2^32 */
 #define ADDR_SPACE_SIZE 0x100000000
+#define KSEG0 0x80000000
+#define KSEG1 0xA0000000
+#define KSEG_SIZE (512 * MB)
 
 #define RESET_EXCEPTION_VECTOR 0xBFC00000
 #define BIOS_PATH "./BIOS/SCPH1001.BIN"
 #define GPR_SIZE 32
-/* for all macros assumption opcode is sizeof(u32) bytes */
+/* for all macros assume opcode is sizeof(u32) bytes */
 #define GET_PRIMARY(opcode) ((opcode) >> 26)
 #define GET_SECONDARY(opcode) ((opcode) & 0x3F)
 #define GET_IMM26(opcode) ((opcode) & 0x3FFFFFF)
@@ -362,9 +370,20 @@ void *psx_alloc_addr_space()
         }                                                                      \
     } while (0)
 
-    u8 *addr = mmap(NULL, ADDR_SPACE_SIZE, PROT_READ | PROT_WRITE,
-                    MAP_PRIVATE | MAP_ANON, -1, 0);
-    CHECK_ERR(addr == MAP_FAILED, "error allocating addr space: %d\n", errno);
+    memory_object_size_t size = ADDR_SPACE_SIZE;
+    mem_entry_name_port_t shmem_handle = MACH_PORT_NULL;
+
+    kern_return_t ret = mach_make_memory_entry_64(
+        mach_task_self(), &size, 0,
+        MAP_MEM_NAMED_CREATE | VM_PROT_READ | VM_PROT_WRITE, &shmem_handle,
+        MACH_PORT_NULL);
+    CHECK_ERR(ret != KERN_SUCCESS, "error making shmem_handle: %d\n", ret);
+
+    vm_address_t addr;
+    ret = vm_map(mach_task_self(), &addr, ADDR_SPACE_SIZE, 0, VM_FLAGS_ANYWHERE,
+                 shmem_handle, 0, false, VM_PROT_READ | VM_PROT_WRITE,
+                 VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_DEFAULT);
+    CHECK_ERR(ret != KERN_SUCCESS, "error allocating addr space: %d\n", ret);
 
     int fd = open(BIOS_PATH, O_RDONLY);
     CHECK_ERR(fd < 0, "error opening bios: %d\n", errno);
@@ -375,12 +394,25 @@ void *psx_alloc_addr_space()
     assert(((uintptr_t)addr + RESET_EXCEPTION_VECTOR) % get_page_size() == 0);
     assert(st.st_size % get_page_size() == 0);
 
-    u8 *bios = mmap(addr + RESET_EXCEPTION_VECTOR, st.st_size, PROT_READ,
+    u8 *bios = mmap((u8 *)addr + RESET_EXCEPTION_VECTOR, st.st_size, PROT_READ,
                     MAP_PRIVATE | MAP_FIXED, fd, 0);
-
     CHECK_ERR(bios == MAP_FAILED, "error allocating bios space: %d\n", errno);
 
+    vm_address_t kseg1 = addr + KSEG1;
+
+    /* try to understand why creating the shared handler first and then mapping
+     * to make mirrors works. */
+    ret = vm_map(mach_task_self(), &kseg1, KSEG_SIZE, 0,
+                 VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, shmem_handle, KSEG0,
+                 false, VM_PROT_READ | VM_PROT_WRITE,
+                 VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_DEFAULT);
+    CHECK_ERR(ret != KERN_SUCCESS, "error mirroring kseg1 to kseg0: %d\n", ret);
+
+    ret = mach_port_deallocate(mach_task_self(), shmem_handle);
+    CHECK_ERR(ret != KERN_SUCCESS, "error deallocating shmem_handle: %d\n",
+              ret);
     close(fd);
+    assert(false);
     return (void *)addr;
 #undef CHECK_ERR
 }
