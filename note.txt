@@ -16,3 +16,18 @@ then that load instruction WILL NOT TAKE EFFECT.
 Although special hardware ensures that a nop is not required between
 the lwl and lwr, there is still a load delay between the second of them
 and a normal instruction. It's treated as if consecutive lwl, lwr are one lw.
+
+create shared memory object for KUSEG up till the BIOS
+create shared memory object for BIOS with READ ONLY protections.
+
+vm_alloc entire address space
+
+vm_map kuseg from memory pager
+vm_map kseg0 from memory pager
+vm_map kseg1 from memory pager
+for all of these vm_map bios.
+
+I would have to create a seperate memory object for the ram mirrors and all other mirrors.
+
+this is painful.
+

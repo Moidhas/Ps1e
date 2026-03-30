@@ -105,16 +105,6 @@ struct psx {
     u8 *addr; /* this is little endian, and m1 chip is also little endian. */
 };
 
-// enum psx_error {
-//     NONE
-// };
-
-// enum psx_error (*actv_sinstr[])(struct psx*) = {
-// };
-
-// enum psx_error (*actv_pinstr[])(struct psx*) = {
-// };
-
 void sll(struct psx *psx, u32 opcode)
 {
     psx->regs[GET_RD(opcode)] = GET_RT(opcode) << GET_IMM5(opcode);
@@ -385,6 +375,16 @@ void *psx_alloc_addr_space()
                  VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_DEFAULT);
     CHECK_ERR(ret != KERN_SUCCESS, "error allocating addr space: %d\n", ret);
 
+    vm_address_t kseg1 = addr + KSEG1;
+
+    /* try to understand why creating the shared handler first and then mapping
+     * to make mirrors works. */
+    ret = vm_map(mach_task_self(), &kseg1, KSEG_SIZE, 0,
+                 VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, shmem_handle, KSEG0,
+                 false, VM_PROT_READ | VM_PROT_WRITE,
+                 VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_DEFAULT);
+    CHECK_ERR(ret != KERN_SUCCESS, "error mirroring kseg1 to kseg0: %d\n", ret);
+
     int fd = open(BIOS_PATH, O_RDONLY);
     CHECK_ERR(fd < 0, "error opening bios: %d\n", errno);
 
@@ -398,21 +398,10 @@ void *psx_alloc_addr_space()
                     MAP_PRIVATE | MAP_FIXED, fd, 0);
     CHECK_ERR(bios == MAP_FAILED, "error allocating bios space: %d\n", errno);
 
-    vm_address_t kseg1 = addr + KSEG1;
-
-    /* try to understand why creating the shared handler first and then mapping
-     * to make mirrors works. */
-    ret = vm_map(mach_task_self(), &kseg1, KSEG_SIZE, 0,
-                 VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, shmem_handle, KSEG0,
-                 false, VM_PROT_READ | VM_PROT_WRITE,
-                 VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_DEFAULT);
-    CHECK_ERR(ret != KERN_SUCCESS, "error mirroring kseg1 to kseg0: %d\n", ret);
-
     ret = mach_port_deallocate(mach_task_self(), shmem_handle);
     CHECK_ERR(ret != KERN_SUCCESS, "error deallocating shmem_handle: %d\n",
               ret);
     close(fd);
-    assert(false);
     return (void *)addr;
 #undef CHECK_ERR
 }
