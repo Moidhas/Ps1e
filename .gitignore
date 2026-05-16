@@ -3,3 +3,4 @@ BIOS/*
 *.out
 yo
 note.txt
+compile_flags.txt

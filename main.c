@@ -25,23 +25,26 @@ typedef int8_t i8;
 #define MB (1 << 20)
 #define GB (1 << 30)
 
-size_t get_page_size()
-{
-    static size_t page_size = 0;
-    if (page_size == 0) {
-        page_size = sysconf(_SC_PAGESIZE);
-    }
-    return page_size;
-}
-
+/* all the sizes are in bytes. */
+#define BIOS_SIZE (512 * KB)
+#define RAM_SIZE (2 * MB)
+#define MIRROR_RAM_SIZE (8 * MB)
 /* since the psx uses 32 bit addresses, total address space is 2^32 */
-#define ADDR_SPACE_SIZE 0x100000000
-#define KSEG0 0x80000000
-#define KSEG1 0xA0000000
-#define KSEG_SIZE (512 * MB)
+#define ADDR_SPACE_SIZE (0x100000000)
+#define KUSEG_SIZE (0x80000000) /* only the first 512 MB are valid */
+#define KSEG0_SIZE (512 * MB)
+#define KSEG1_SIZE (KSEG0_SIZE)
+#define KSEG2_SIZE (GB)
 
+#define KUSEG_START (0)
+#define KSEG0_START (KUSEG_START + KUSEG_SIZE)
+#define KSEG1_START (KSEG0_START + KSEG0_SIZE)
+#define KSEG2_START (KSEG1_START + KSEG1_SIZE)
+
+#define BASE_BIOS_ADDR 0x1FC00000
 #define RESET_EXCEPTION_VECTOR 0xBFC00000
 #define BIOS_PATH "./BIOS/SCPH1001.BIN"
+
 #define GPR_SIZE 32
 /* for all macros assume opcode is sizeof(u32) bytes */
 #define GET_PRIMARY(opcode) ((opcode) >> 26)
@@ -53,6 +56,23 @@ size_t get_page_size()
 #define GET_RD(opcode) (((opcode) >> 11) & 0x1F)
 #define GET_RT(opcode) (((opcode) >> 16) & 0x1F)
 #define GET_RS(opcode) (((opcode) >> 21) & 0x1F)
+
+#define CHECK_ERR(expr, fstr, fmt)                                             \
+    do {                                                                       \
+        if (expr) {                                                            \
+            fprintf(stderr, fstr, fmt);                                        \
+            exit(EXIT_FAILURE);                                                \
+        }                                                                      \
+    } while (0)
+
+size_t get_page_size()
+{
+    static size_t page_size = 0;
+    if (page_size == 0) {
+        page_size = sysconf(_SC_PAGESIZE);
+    }
+    return page_size;
+}
 
 struct psx {
     union {
@@ -83,20 +103,20 @@ struct psx {
             u32 s4;
             u32 s5;
             u32 s6;
-            u32 s7; /*    Static variables, must be saved by subs */
+            u32 s7; /* Static variables, must be saved by subs */
             u32 t8;
             u32 t9; /* Temporaries, may be changed by subroutines */
             u32 k0;
-            u32 k1; /*   Reserved for kernel (destroyed by some IRQ handlers!)
+            u32 k1; /* Reserved for kernel (destroyed by some IRQ handlers!)
                      */
-            u32 gp; /*     Global pointer (rarely used) */
+            u32 gp; /* Global pointer (rarely used) */
             u32 sp; /* Stack pointer */
-            u32 fp; /*  Frame Pointer, or 9th Static variable, must be saved */
-            u32 ra; /*    Return address (used so by JAL,BLTZAL,BGEZAL opcodes)
+            u32 fp; /* Frame Pointer, or 9th Static variable, must be saved */
+            u32 ra; /* Return address (used so by JAL,BLTZAL,BGEZAL opcodes)
                      */
             u32 pc;
             u32 hi;
-            u32 lo; /* these registers are not general purpose (can't be
+            u32 lo; /* These registers are not general purpose (can't be
                        accessed by opcodes) */
         };
     };
@@ -349,68 +369,79 @@ h_na:
 #undef DISPATCH
 }
 
-/* allocates psx address space, setups mirroring and protections. */
-void *psx_alloc_addr_space()
+void make_kseg(vm_address_t base_kseg, mem_entry_name_port_t shared_ram,
+               int bios_fd)
 {
-#define CHECK_ERR(expr, fstr, fmt)                                             \
-    do {                                                                       \
-        if (expr) {                                                            \
-            fprintf(stderr, fstr, fmt);                                        \
-            exit(EXIT_FAILURE);                                                \
-        }                                                                      \
-    } while (0)
+    kern_return_t ret = KERN_SUCCESS;
 
-    memory_object_size_t size = ADDR_SPACE_SIZE;
-    mem_entry_name_port_t shmem_handle = MACH_PORT_NULL;
+    for (vm_address_t ram_mirror = base_kseg;
+         ram_mirror < base_kseg + MIRROR_RAM_SIZE; ram_mirror += RAM_SIZE) {
+
+        ret = vm_map(mach_task_self(), &ram_mirror, RAM_SIZE, 0,
+                     VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, shared_ram, 0, false,
+                     VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE,
+                     VM_INHERIT_DEFAULT);
+        CHECK_ERR(ret != KERN_SUCCESS, "error allocating ram kseg space: %d\n",
+                  ret);
+    }
+
+    u8 *bios = mmap((u8 *)base_kseg + BASE_BIOS_ADDR, BIOS_SIZE, PROT_READ,
+                    MAP_PRIVATE | MAP_FIXED, bios_fd, 0);
+    CHECK_ERR(bios == MAP_FAILED, "error allocating bios space: %d\n", errno);
+}
+
+void *make_psx_addr_space()
+{
+    memory_object_size_t size = RAM_SIZE;
+    mem_entry_name_port_t shared_ram = MACH_PORT_NULL;
 
     kern_return_t ret = mach_make_memory_entry_64(
         mach_task_self(), &size, 0,
-        MAP_MEM_NAMED_CREATE | VM_PROT_READ | VM_PROT_WRITE, &shmem_handle,
+        MAP_MEM_NAMED_CREATE | VM_PROT_READ | VM_PROT_WRITE, &shared_ram,
         MACH_PORT_NULL);
-    CHECK_ERR(ret != KERN_SUCCESS, "error making shmem_handle: %d\n", ret);
+    CHECK_ERR(ret != KERN_SUCCESS, "error making shared_ram: %d\n", ret);
 
-    vm_address_t addr;
+    vm_address_t addr = 0;
     ret = vm_map(mach_task_self(), &addr, ADDR_SPACE_SIZE, 0, VM_FLAGS_ANYWHERE,
-                 shmem_handle, 0, false, VM_PROT_READ | VM_PROT_WRITE,
+                 MEMORY_OBJECT_NULL, 0, false, VM_PROT_READ | VM_PROT_WRITE,
                  VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_DEFAULT);
     CHECK_ERR(ret != KERN_SUCCESS, "error allocating addr space: %d\n", ret);
 
-    vm_address_t kseg1 = addr + KSEG1;
-
-    /* try to understand why creating the shared handler first and then mapping
-     * to make mirrors works. */
-    ret = vm_map(mach_task_self(), &kseg1, KSEG_SIZE, 0,
-                 VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, shmem_handle, KSEG0,
-                 false, VM_PROT_READ | VM_PROT_WRITE,
-                 VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_DEFAULT);
-    CHECK_ERR(ret != KERN_SUCCESS, "error mirroring kseg1 to kseg0: %d\n", ret);
-
-    int fd = open(BIOS_PATH, O_RDONLY);
-    CHECK_ERR(fd < 0, "error opening bios: %d\n", errno);
-
+    int bios_fd = open(BIOS_PATH, O_RDONLY);
+    CHECK_ERR(bios_fd < 0, "error opening bios: %d\n", errno);
     struct stat st;
-    CHECK_ERR(fstat(fd, &st) < 0, "error stats bios: %d\n", errno);
+    CHECK_ERR(fstat(bios_fd, &st) < 0, "error stats bios: %d\n", errno);
+    assert(st.st_size == BIOS_SIZE);
 
-    assert(((uintptr_t)addr + RESET_EXCEPTION_VECTOR) % get_page_size() == 0);
-    assert(st.st_size % get_page_size() == 0);
+    make_kseg(addr + KUSEG_START, shared_ram, bios_fd);
+    make_kseg(addr + KSEG0_START, shared_ram, bios_fd);
+    make_kseg(addr + KSEG1_START, shared_ram, bios_fd);
 
-    u8 *bios = mmap((u8 *)addr + RESET_EXCEPTION_VECTOR, st.st_size, PROT_READ,
-                    MAP_PRIVATE | MAP_FIXED, fd, 0);
-    CHECK_ERR(bios == MAP_FAILED, "error allocating bios space: %d\n", errno);
+    /* cleanup */
+    ret = mach_port_deallocate(mach_task_self(), shared_ram);
+    CHECK_ERR(ret != KERN_SUCCESS, "error deallocating shared_ram: %d\n", ret);
+    close(bios_fd);
 
-    ret = mach_port_deallocate(mach_task_self(), shmem_handle);
-    CHECK_ERR(ret != KERN_SUCCESS, "error deallocating shmem_handle: %d\n",
-              ret);
-    close(fd);
+    /* testing */
+    uint8_t *base = (uint8_t *)addr;
+    base[0] = 'A';
+    base[1] = 'S';
+    base[2] = 'S';
+    base[3] = 0;
+    assert(strcmp((char *)base, (char *)(base + KSEG0_START)) == 0);
+    assert(strcmp((char *)base, (char *)(base + KSEG1_START)) == 0);
+    assert(strcmp((char *)base, (char *)(base + RAM_SIZE)) == 0);
+    assert(strcmp((char *)base, (char *)(base + 2 * RAM_SIZE)) == 0);
+    assert(base[RESET_EXCEPTION_VECTOR] == base[BASE_BIOS_ADDR]);
+
     return (void *)addr;
-#undef CHECK_ERR
 }
 
 int main()
 {
     struct psx psx;
     memset(&psx, 0, sizeof(psx));
-    psx.addr = psx_alloc_addr_space();
+    psx.addr = make_psx_addr_space();
     start(&psx);
     vm_deallocate(mach_task_self(), (vm_address_t)psx.addr, ADDR_SPACE_SIZE);
 }
