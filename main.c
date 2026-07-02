@@ -161,7 +161,7 @@ struct psx {
         };
     };
 
-    /* Used to handle branch delays, denotes the value of pc after the next
+    /* Used to handle branch delays, denotes the value of pc after the current
      * instruction completes. Jump instructions write to this. */
     u32 next_pc;
 
@@ -191,20 +191,10 @@ struct load_delay_slot lds_pop(struct load_delay_slot lds[2])
     return top;
 }
 
+/* just push into back load delay slot. */
 void lds_push(struct load_delay_slot lds[2], u32 reg_index, u32 value)
 {
     assert(!(reg_index == 0 && value != 0));
-
-    if (lds[0].reg_index == 0) {
-        lds[0].reg_index = reg_index;
-        lds[0].value = value;
-        return;
-    }
-
-    if (lds[1].reg_index != 0) {
-        lds_pop(lds);
-    }
-
     lds[1].reg_index = reg_index;
     lds[1].value = value;
 }
@@ -214,9 +204,24 @@ void sll(struct psx *psx, u32 opcode)
     psx->regs[GET_RD(opcode)] = GET_RT(opcode) << GET_IMM5(opcode);
 }
 
+void sltu(struct psx *psx, u32 opcode)
+{
+    psx->regs[GET_RD(opcode)] =
+        (psx->regs[GET_RS(opcode)] < psx->regs[GET_RT(opcode)]);
+}
+
 void lui(struct psx *psx, u32 opcode)
 {
     psx->regs[GET_RT(opcode)] = opcode << 16;
+}
+
+/* In mips the instruction being processed has the pc pointing to the next
+ * instruction to be run. */
+
+void jr(struct psx *psx, u32 opcode)
+{
+    assert(psx->regs[GET_RS(opcode)] % 4 == 0 && "unaligned address");
+    psx->next_pc = psx->regs[GET_RS(opcode)];
 }
 
 void j(struct psx *psx, u32 opcode)
@@ -224,12 +229,23 @@ void j(struct psx *psx, u32 opcode)
     psx->next_pc = (psx->pc & 0xF0000000) + (GET_IMM26(opcode) << 2);
 }
 
-void bne(struct psx *psx, u32 opcode)
+void jal(struct psx *psx, u32 addr_to_instr, u32 opcode)
+{
+    psx->next_pc = (psx->pc & 0xF0000000) + (GET_IMM26(opcode) << 2);
+    psx->ra = addr_to_instr + 8;
+}
+
+void beq(struct psx *psx, u32 addr_to_instr, u32 opcode)
+{
+    if (psx->regs[GET_RS(opcode)] == psx->regs[(GET_RT(opcode))]) {
+        psx->next_pc = addr_to_instr + 4 + (GET_SIMM16(opcode) << 2);
+    }
+}
+
+void bne(struct psx *psx, u32 addr_to_instr, u32 opcode)
 {
     if (psx->regs[GET_RS(opcode)] != psx->regs[(GET_RT(opcode))]) {
-        psx->next_pc = psx->pc + (GET_SIMM16(opcode) << 2);
-    } else {
-        psx->next_pc = psx->pc + 4;
+        psx->next_pc = addr_to_instr + 4 + (GET_SIMM16(opcode) << 2);
     }
 }
 
@@ -242,13 +258,26 @@ void addi(struct psx *psx, u32 opcode)
 {
     i32 val = psx->regs[GET_RS(opcode)];
     i16 imm = GET_SIMM16(opcode);
-    i64 sum = val + imm;
+    i64 sum = (i64)val + imm;
 
     if (INT_MAX < sum || sum < INT_MIN) {
         assert(false);
     }
 
-    psx->regs[GET_RT(opcode)] = val + imm;
+    psx->regs[GET_RT(opcode)] = sum;
+}
+
+void add(struct psx *psx, u32 opcode)
+{
+    i32 a = psx->regs[GET_RS(opcode)];
+    i32 b = psx->regs[GET_RT(opcode)];
+    i64 sum = (i64)a + b;
+
+    if (INT_MAX < sum || sum < INT_MIN) {
+        assert(false);
+    }
+
+    psx->regs[GET_RD(opcode)] = sum;
 }
 
 void addu(struct psx *psx, u32 opcode)
@@ -262,19 +291,49 @@ void ori(struct psx *psx, u32 opcode)
     psx->regs[GET_RT(opcode)] = psx->regs[GET_RS(opcode)] | GET_UIMM16(opcode);
 }
 
-void sw(struct psx *psx, u32 opcode)
+void andi(struct psx *psx, u32 opcode)
 {
-    /* has to be 4 bytes aligned */
-    assert((psx->regs[GET_RS(opcode)] + GET_SIMM16(opcode)) % sizeof(u32) == 0);
+    psx->regs[GET_RT(opcode)] = psx->regs[GET_RS(opcode)] & GET_UIMM16(opcode);
+}
 
-    printf("\tstoring to memory at: 0x%08x, value: 0x%08x\n",
-           psx->regs[GET_RS(opcode)] + GET_SIMM16(opcode),
-           psx->regs[GET_RT(opcode)]);
+void sb(struct psx *psx, u32 opcode)
+{
+    u32 addr = psx->regs[GET_RS(opcode)] + GET_SIMM16(opcode);
+    u16 value = psx->regs[GET_RT(opcode)] & 0xFF;
+    printf("\tstoring to memory at: 0x%08x, value: 0x%08x\n", addr, value);
 
     /* assuming machine is little endian */
-    u32 *addr =
-        (u32 *)&psx->addr[psx->regs[GET_RS(opcode)] + GET_SIMM16(opcode)];
-    addr[0] = psx->regs[GET_RT(opcode)];
+    u8 *byte = &psx->addr[addr];
+    byte[0] = value;
+}
+
+void sh(struct psx *psx, u32 opcode)
+{
+    u32 addr = psx->regs[GET_RS(opcode)] + GET_SIMM16(opcode);
+    /* has to be 2 bytes aligned */
+    assert(addr % sizeof(u16) == 0);
+
+    u16 value = psx->regs[GET_RT(opcode)] & 0xFFFF;
+    printf("\tstoring to memory at: 0x%08x, value: 0x%08x\n", addr, value);
+
+    /* assuming machine is little endian */
+    u16 *half_word = (u16 *)&psx->addr[addr];
+    half_word[0] = value;
+}
+
+void sw(struct psx *psx, u32 opcode)
+{
+    u32 addr = psx->regs[GET_RS(opcode)] + GET_SIMM16(opcode);
+    printf("\tstoring to memory at: 0x%08x, value: 0x%08x\n", addr,
+           psx->regs[GET_RT(opcode)]);
+
+    /* has to be 4 bytes aligned */
+    assert(addr % sizeof(u32) == 0);
+
+
+    /* assuming machine is little endian */
+    u32 *word = (u32 *)&psx->addr[addr];
+    word[0] = psx->regs[GET_RT(opcode)];
 }
 
 void lhu(struct psx *psx, u32 opcode)
@@ -291,33 +350,50 @@ void lhu(struct psx *psx, u32 opcode)
     psx->regs[GET_RT(opcode)] = *(u16 *)&psx->addr[word];
 }
 
+void and(struct psx *psx, u32 opcode)
+{
+    psx->regs[GET_RD(opcode)] =
+        psx->regs[GET_RS(opcode)] & psx->regs[GET_RT(opcode)];
+}
+
 void or(struct psx *psx, u32 opcode)
 {
     psx->regs[GET_RD(opcode)] =
         psx->regs[GET_RS(opcode)] | psx->regs[GET_RT(opcode)];
 }
 
+void lb(struct psx *psx, u32 opcode)
+{
+    u32 addr = (i32)GET_SIMM16(opcode) + psx->regs[GET_RS(opcode)];
+
+    u8 byte = psx->addr[addr];
+
+    printf("\tloading from memory at: 0x%08x, value: 0x%08x\n", addr, byte);
+
+    lds_push(psx->load_delay_slots, GET_RT(opcode), byte);
+}
+
 void lw(struct psx *psx, u32 opcode)
 {
-    assert(false);
-    u32 word = (i32)GET_SIMM16(opcode) + psx->regs[GET_RS(opcode)];
+    u32 addr = (i32)GET_SIMM16(opcode) + psx->regs[GET_RS(opcode)];
     /* needs to be an exception if not 4 bytes aligned. */
-    assert(word % 4 == 0);
+    assert(addr % 4 == 0);
 
     /* assuming machine is little endian. change to memcpy. */
-    u32 value = *(u32 *)&psx->addr[word];
+    u32 word = *(u32 *)&psx->addr[addr];
 
-    printf("\tloading from memory at: 0x%08x, value: 0x%08x\n", word, value);
+    printf("\tloading from memory at: 0x%08x, value: 0x%08x\n", addr, word);
 
-    lds_push(psx->load_delay_slots, GET_RT(opcode), value);
+    lds_push(psx->load_delay_slots, GET_RT(opcode), word);
 }
 
 void cop0_exec(struct psx *psx, u32 opcode)
 {
     if (GET_RS(opcode) == 0) { // mfc0
-        assert(false);
         lds_push(psx->load_delay_slots, GET_RT(opcode),
                  psx->cop0[GET_RD(opcode)]);
+        printf("\tloading from cop0 at: %d, value: 0x%08x\n", GET_RD(opcode),
+               psx->cop0[GET_RD(opcode)]);
     } else if (GET_RS(opcode) == 0b00100) { // mtc0 ignoring store delays
         assert(GET_RD(opcode) < (sizeof(psx->cop0) / sizeof(psx->cop0[0])));
         psx->cop0[GET_RD(opcode)] = psx->regs[GET_RT(opcode)];
@@ -370,6 +446,15 @@ void start(struct psx *psx)
     u32 opcode = 0;
     psx->pc = RESET_EXCEPTION_VECTOR;
     psx->next_pc = psx->pc + 4;
+    u32 addr_to_instr = psx->pc;
+
+#define DEBUG_INFO(symbol_name)                                                \
+    do {                                                                       \
+        printf("pc: 0x%08x, %s, opcode: 0x%08x, primary: 0x%02x, secondary: "  \
+               "0x%02x\n",                                                     \
+               psx->pc, symbol_name, opcode, GET_PRIMARY(opcode),              \
+               GET_SECONDARY(opcode));                                         \
+    } while (0)
 
 #define PRE_OP()                                                               \
     do {                                                                       \
@@ -387,9 +472,6 @@ void start(struct psx *psx)
     do {                                                                       \
         assert(psx->zero == 0);                                                \
         opcode = *((u32 *)&psx->memmap[psx->pc]); /* m1 is little endian */    \
-        printf("pc: 0x%08x, opcode: 0x%08x, primary: 0x%02x, secondary: "      \
-               "0x%02x\n",                                                     \
-               psx->pc, opcode, GET_PRIMARY(opcode), GET_SECONDARY(opcode));   \
         assert(GET_PRIMARY(opcode) <                                           \
                sizeof(dispatch_tbl) / sizeof(dispatch_tbl[0]));                \
         if (GET_PRIMARY(opcode) != 0) {                                        \
@@ -404,176 +486,284 @@ void start(struct psx *psx)
     DISPATCH();
 
 h_bcondz:
+    DEBUG_INFO("h_bcondz");
     assert(false);
 h_j:
+    DEBUG_INFO("h_j");
     psx->pc = psx->next_pc;
     j(psx, opcode);
+    POST_OP();
     DISPATCH();
 h_jal:
-    assert(false);
-h_beq:
-    assert(false);
-h_bne:
+    DEBUG_INFO("h_jal");
+    addr_to_instr = psx->pc;
     psx->pc = psx->next_pc;
-    bne(psx, opcode);
+    jal(psx, addr_to_instr, opcode);
+    POST_OP();
+    DISPATCH();
+h_beq:
+    DEBUG_INFO("h_beq");
+    addr_to_instr = psx->pc;
+    PRE_OP();
+    beq(psx, addr_to_instr, opcode);
+    POST_OP();
+    DISPATCH();
+h_bne:
+    DEBUG_INFO("h_bne");
+    addr_to_instr = psx->pc;
+    PRE_OP();
+    bne(psx, addr_to_instr, opcode);
+    POST_OP();
     DISPATCH();
 h_blez:
+    DEBUG_INFO("h_blez");
     assert(false);
 h_bgtz:
+    DEBUG_INFO("h_bgtz");
     assert(false);
 h_addi:
+    DEBUG_INFO("h_addi");
     PRE_OP();
     addi(psx, opcode);
     POST_OP();
     DISPATCH();
 h_addiu:
+    DEBUG_INFO("h_addiu");
     PRE_OP();
     addiu(psx, opcode);
     POST_OP();
     DISPATCH();
 h_slti:
+    DEBUG_INFO("h_slti");
     assert(false);
 h_sltiu:
+    DEBUG_INFO("h_sltiu");
     assert(false);
 h_andi:
-    assert(false);
+    DEBUG_INFO("h_andi");
+    PRE_OP();
+    andi(psx, opcode);
+    POST_OP();
+    DISPATCH();
 h_ori:
+    DEBUG_INFO("h_ori");
     PRE_OP();
     ori(psx, opcode);
     POST_OP();
     DISPATCH();
 h_xori:
+    DEBUG_INFO("h_xori");
     assert(false);
 h_lui:
+    DEBUG_INFO("h_lui");
     PRE_OP();
     lui(psx, opcode);
     POST_OP();
     DISPATCH();
 h_cop0:
+    DEBUG_INFO("h_cop0");
     PRE_OP();
     cop0_exec(psx, opcode);
+    POST_OP();
     DISPATCH();
 h_cop1:
+    DEBUG_INFO("h_cop1");
     assert(false);
 h_cop2:
+    DEBUG_INFO("h_cop2");
     assert(false);
 h_cop3:
+    DEBUG_INFO("h_cop3");
     assert(false);
 h_lb:
+    DEBUG_INFO("h_lb");
+    PRE_OP();
+    lb(psx, opcode);
+    POST_OP();
+    DISPATCH();
     assert(false);
 h_lh:
+    DEBUG_INFO("h_lh");
     assert(false);
 h_lwl:
+    DEBUG_INFO("h_lwl");
     assert(false);
 h_lw:
+    DEBUG_INFO("h_lw");
+    PRE_OP();
     lw(psx, opcode);
-    assert(false);
+    POST_OP();
+    DISPATCH();
 h_lbu:
+    DEBUG_INFO("h_lbu");
     assert(false);
 h_lhu:
+    DEBUG_INFO("h_lhu");
     assert(false);
     PRE_OP();
     lhu(psx, opcode);
+    POST_OP();
     DISPATCH();
 h_lwr:
+    DEBUG_INFO("h_lwr");
     assert(false);
 h_sb:
-    assert(false);
+    DEBUG_INFO("h_sb");
+    PRE_OP();
+    sb(psx, opcode);
+    POST_OP();
+    DISPATCH();
 h_sh:
-    assert(false);
+    DEBUG_INFO("h_sh");
+    PRE_OP();
+    sh(psx, opcode);
+    POST_OP();
+    DISPATCH();
 h_swl:
+    DEBUG_INFO("h_swl");
     assert(false);
 h_sw:
-    psx->pc = psx->next_pc;
-    psx->next_pc += 4;
+    DEBUG_INFO("h_sw");
+    PRE_OP();
     sw(psx, opcode);
+    POST_OP();
     DISPATCH();
 h_swr:
+    DEBUG_INFO("h_swr");
     assert(false);
 h_lwc0:
+    DEBUG_INFO("h_lwc0");
     assert(false);
 h_lwc1:
+    DEBUG_INFO("h_lwc1");
     assert(false);
 h_lwc2:
+    DEBUG_INFO("h_lwc2");
     assert(false);
 h_lwc3:
+    DEBUG_INFO("h_lwc3");
     assert(false);
 h_swc0:
+    DEBUG_INFO("h_swc0");
     assert(false);
 h_swc1:
+    DEBUG_INFO("h_swc1");
     assert(false);
 h_swc2:
+    DEBUG_INFO("h_swc2");
     assert(false);
 h_swc3:
+    DEBUG_INFO("h_swc3");
     assert(false);
 /* special */
 h_sll:
-    psx->pc = psx->next_pc;
-    psx->next_pc += 4;
+    DEBUG_INFO("h_sll");
+    PRE_OP();
     sll(psx, opcode);
+    POST_OP();
     DISPATCH();
 h_srl:
+    DEBUG_INFO("h_srl");
     assert(false);
 h_sra:
+    DEBUG_INFO("h_sra");
     assert(false);
 h_sllv:
+    DEBUG_INFO("h_sllv");
     assert(false);
 h_srlv:
+    DEBUG_INFO("h_srlv");
     assert(false);
 h_srav:
+    DEBUG_INFO("h_srav");
     assert(false);
 h_jr:
+    DEBUG_INFO("h_jr");
+    psx->pc = psx->next_pc;
+    jr(psx, opcode);
+    POST_OP();
+    DISPATCH();
     assert(false);
 h_jalr:
+    DEBUG_INFO("h_jalr");
     assert(false);
 h_syscall:
+    DEBUG_INFO("h_syscall");
     assert(false);
 h_break:
+    DEBUG_INFO("h_break");
     assert(false);
 h_mfhi:
+    DEBUG_INFO("h_mfhi");
     assert(false);
 h_mthi:
+    DEBUG_INFO("h_mthi");
     assert(false);
 h_mflo:
+    DEBUG_INFO("h_mflo");
     assert(false);
 h_mtlo:
+    DEBUG_INFO("h_mtlo");
     assert(false);
 h_mult:
+    DEBUG_INFO("h_mult");
     assert(false);
 h_multu:
+    DEBUG_INFO("h_multu");
     assert(false);
 h_div:
+    DEBUG_INFO("h_div");
     assert(false);
 h_divu:
+    DEBUG_INFO("h_divu");
     assert(false);
 h_add:
-    assert(false);
+    DEBUG_INFO("h_add");
+    PRE_OP();
+    add(psx, opcode);
+    POST_OP();
+    DISPATCH();
 h_addu:
-    assert(false);
-    psx->pc = psx->next_pc;
-    psx->next_pc += 4;
+    DEBUG_INFO("h_addu");
+    PRE_OP();
     addu(psx, opcode);
+    POST_OP();
     DISPATCH();
 h_sub:
+    DEBUG_INFO("h_sub");
     assert(false);
 h_subu:
+    DEBUG_INFO("h_subu");
     assert(false);
 h_and:
-    assert(false);
+    DEBUG_INFO("h_and");
+    PRE_OP();
+    and(psx, opcode);
+    POST_OP();
+    DISPATCH();
 h_or:
-    psx->pc = psx->next_pc;
-    psx->next_pc += 4;
+    DEBUG_INFO("h_or");
+    PRE_OP();
     or(psx, opcode);
+    POST_OP();
     DISPATCH();
 h_xor:
+    DEBUG_INFO("h_xor");
     assert(false);
 h_nor:
+    DEBUG_INFO("h_nor");
     assert(false);
 h_slt:
+    DEBUG_INFO("h_slt");
     assert(false);
 h_sltu:
-    assert(false);
+    DEBUG_INFO("h_sltu");
+    PRE_OP();
+    sltu(psx, opcode);
+    POST_OP();
+    DISPATCH();
 h_na:
+    DEBUG_INFO("h_na");
     assert(false);
 
 #undef DISPATCH
@@ -721,4 +911,6 @@ int main()
 
     start(&psx);
     vm_deallocate(mach_task_self(), (vm_address_t)psx.addr, ADDR_SPACE_SIZE);
+    vm_deallocate(mach_task_self(), (vm_address_t)psx.isolated_cache,
+                  ADDR_SPACE_SIZE);
 }
