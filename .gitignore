@@ -2,5 +2,5 @@
 BIOS/*
 *.out
 yo
-note.txt
+*.txt
 compile_flags.txt

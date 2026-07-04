@@ -21,6 +21,11 @@ typedef int32_t i32;
 typedef int16_t i16;
 typedef int8_t i8;
 
+/* DEBUG RELATED MACROS */
+#define DEBUG 1 // not 0 debug, 0 no debug.
+// always 7 spaces between opcode and register fields in debug format.
+#define OPCODE_ALIGNMENT 7
+
 /* all of these are in bytes. */
 #define KB (1 << 10)
 #define MB (1 << 20)
@@ -51,17 +56,21 @@ typedef int8_t i8;
 
 #define BIOS_PATH "./BIOS/SCPH1001.BIN"
 
-#define GPR_SIZE 32
-/* for all macros assume opcode is sizeof(u32) bytes */
-#define GET_PRIMARY(opcode) ((opcode) >> 26)
-#define GET_SECONDARY(opcode) ((opcode) & 0x3F)
-#define GET_IMM26(opcode) ((opcode) & 0x3FFFFFF)
-#define GET_UIMM16(opcode) ((opcode) & 0xFFFF)      /* Unsigned */
-#define GET_SIMM16(opcode) (i16)((opcode) & 0xFFFF) /* Signed */
-#define GET_IMM5(opcode) (((opcode) >> 6) & 0x1F)
-#define GET_RD(opcode) (((opcode) >> 11) & 0x1F) /* Bits 11 to 15 */
-#define GET_RT(opcode) (((opcode) >> 16) & 0x1F)
-#define GET_RS(opcode) (((opcode) >> 21) & 0x1F) /* Bits 21 to 25 */
+/* for all macros assume instr is sizeof(u32) bytes */
+#define GET_OPCODE(instr) ((instr) >> 26)
+#define GET_FUNCT(instr) ((instr) & 0x3F)
+#define GET_RS(instr) (((instr) >> 21) & 0x1F) /* Bits 21 to 25 */
+#define GET_RT(instr) (((instr) >> 16) & 0x1F)
+#define GET_RD(instr) (((instr) >> 11) & 0x1F) /* Bits 11 to 15 */
+#define GET_SHAMT(instr) (((instr) >> 6) & 0x1F)
+
+#define GET_IMM26(instr) ((instr) & 0x3FFFFFF)
+#define GET_UIMM16(instr) ((instr) & 0xFFFF)     /* Unsigned */
+#define GET_IMM16(instr) (i16)((instr) & 0xFFFF) /* Signed */
+
+#define GET_TARGET(pc, instr) (((pc) & 0xF0000000) | (GET_IMM26(instr) << 2))
+#define GET_BRANCH(addr_to_instr, instr)                                       \
+    ((addr_to_instr) + 4 + (GET_IMM16(instr) << 2))
 
 /* SR MACROS */
 #define SR_GET_ISC(sr) (((sr) >> 16) & 0x1)
@@ -89,6 +98,12 @@ size_t get_page_size()
     }
     return page_size;
 }
+
+const char *regs_name[35] = {
+    "r0", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3",
+    "t4", "t5", "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
+    "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra", "pc", "hi", "lo",
+};
 
 struct psx {
     union {
@@ -141,7 +156,7 @@ struct psx {
     };
 
     /* Loading operations store values into delay slots which get flushed out
-     * after the next opcode completes.
+     * after the next instruction completes.
      * The current behaviour does not take into account the following scenarios:
      * scene1: lw rn, value, add rn, value1
      * scene2: lw rn, value, lw rn value1 */
@@ -160,6 +175,11 @@ struct psx {
             u32 useless2[3];
         };
     };
+
+    /* Address to current instruction executing.
+     * Needed since pc points to the address of the next instruction to be
+     * executed during execution of the current instruction. */
+    u32 addr_to_instr;
 
     /* Used to handle branch delays, denotes the value of pc after the current
      * instruction completes. Jump instructions write to this. */
@@ -199,207 +219,359 @@ void lds_push(struct load_delay_slot lds[2], u32 reg_index, u32 value)
     lds[1].value = value;
 }
 
-void sll(struct psx *psx, u32 opcode)
+static inline void print_imm16(i16 imm)
 {
-    psx->regs[GET_RD(opcode)] = GET_RT(opcode) << GET_IMM5(opcode);
-}
-
-void sltu(struct psx *psx, u32 opcode)
-{
-    psx->regs[GET_RD(opcode)] =
-        (psx->regs[GET_RS(opcode)] < psx->regs[GET_RT(opcode)]);
-}
-
-void lui(struct psx *psx, u32 opcode)
-{
-    psx->regs[GET_RT(opcode)] = opcode << 16;
-}
-
-/* In mips the instruction being processed has the pc pointing to the next
- * instruction to be run. */
-
-void jr(struct psx *psx, u32 opcode)
-{
-    assert(psx->regs[GET_RS(opcode)] % 4 == 0 && "unaligned address");
-    psx->next_pc = psx->regs[GET_RS(opcode)];
-}
-
-void j(struct psx *psx, u32 opcode)
-{
-    psx->next_pc = (psx->pc & 0xF0000000) + (GET_IMM26(opcode) << 2);
-}
-
-void jal(struct psx *psx, u32 addr_to_instr, u32 opcode)
-{
-    psx->next_pc = (psx->pc & 0xF0000000) + (GET_IMM26(opcode) << 2);
-    psx->ra = addr_to_instr + 8;
-}
-
-void beq(struct psx *psx, u32 addr_to_instr, u32 opcode)
-{
-    if (psx->regs[GET_RS(opcode)] == psx->regs[(GET_RT(opcode))]) {
-        psx->next_pc = addr_to_instr + 4 + (GET_SIMM16(opcode) << 2);
+    if (imm < 0) {
+        printf("-0x%04x", -imm);
+    } else {
+        printf("0x%04x", imm);
     }
 }
 
-void bne(struct psx *psx, u32 addr_to_instr, u32 opcode)
+static inline void print_word(struct psx *psx, u32 instr)
 {
-    if (psx->regs[GET_RS(opcode)] != psx->regs[(GET_RT(opcode))]) {
-        psx->next_pc = addr_to_instr + 4 + (GET_SIMM16(opcode) << 2);
+    u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
+    u32 word = *(u32 *)&psx->addr[addr];
+    printf("([%08x] = %08x)", addr, word);
+}
+
+static inline void print_halfword(struct psx *psx, u32 instr)
+{
+    u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
+    u16 halfword = *(u16 *)&psx->addr[addr];
+    printf("([%08x] = %04x)", addr, halfword);
+}
+
+static inline void print_byte(struct psx *psx, u32 instr)
+{
+    u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
+    u8 byte = psx->addr[addr];
+    printf("([%08x] = %02x)", addr, byte);
+}
+
+enum dasm_op {
+    d_RS,
+    d_RT,
+    d_RD,
+    d_SHAMT,
+    d_UIMM16,
+    d_IMM16,
+    d_WORD,
+    d_HALF_WORD,
+    d_BYTE,
+    d_TARGET,
+    STOP,
+};
+
+void dasm_print(struct psx *psx, u32 instr, const char *sym, ...)
+{
+    printf("%08x %08x: %-*s", psx->addr_to_instr, instr, OPCODE_ALIGNMENT, sym);
+
+    bool comma = false;
+
+    u8 rids[] = {GET_RS(instr), GET_RT(instr), GET_RD(instr)};
+
+    va_list args;
+    va_start(args, sym);
+    for (enum dasm_op op = va_arg(args, enum dasm_op); op != STOP;
+         op = va_arg(args, enum dasm_op)) {
+
+        if (comma)
+            printf(", ");
+
+        switch (op) {
+        case d_RS:
+        case d_RT:
+        case d_RD:
+            printf("$%s(%08x)", regs_name[rids[op]], psx->regs[rids[op]]);
+            break;
+        case d_SHAMT:
+            printf("0x%02x", GET_SHAMT(instr));
+            break;
+        case d_UIMM16:
+            printf("0x%04x", GET_UIMM16(instr));
+            break;
+        case d_IMM16:
+            print_imm16(GET_IMM16(instr));
+            break;
+        case d_WORD:
+            print_imm16(GET_IMM16(instr));
+            printf("(%s)", regs_name[GET_RS(instr)]);
+            print_word(psx, instr);
+            break;
+        case d_TARGET:
+            printf("0x%08x", GET_TARGET(psx->pc, instr));
+            break;
+        default:
+            assert(false);
+        }
+
+        comma = true;
+    }
+
+    va_end(args);
+    printf("\n");
+}
+
+
+void dasm_lui(struct psx *psx, u32 instr)
+{
+    dasm_print(psx, instr, "lui", d_RT, d_UIMM16, STOP);
+}
+
+void dasm_ori(struct psx *psx, u32 instr)
+{
+    if (GET_RS(instr) == 0) {
+        dasm_print(psx, instr, "li", d_RT, d_UIMM16, STOP);
+    } else if (GET_RS(instr) == GET_RT(instr)) {
+        dasm_print(psx, instr, "ori", d_RT, d_UIMM16, STOP);
+    } else {
+        dasm_print(psx, instr, "ori", d_RT, d_RS, d_UIMM16, STOP);
     }
 }
 
-void addiu(struct psx *psx, u32 opcode)
+void dasm_sw(struct psx *psx, u32 instr)
 {
-    psx->regs[GET_RT(opcode)] = psx->regs[GET_RS(opcode)] + GET_SIMM16(opcode);
+    dasm_print(psx, instr, "sw", d_RT, d_WORD, STOP);
 }
 
-void addi(struct psx *psx, u32 opcode)
+void dasm_sll(struct psx *psx, u32 instr)
 {
-    i32 val = psx->regs[GET_RS(opcode)];
-    i16 imm = GET_SIMM16(opcode);
+    if (instr == 0) {
+        dasm_print(psx, instr, "nop", STOP);
+    } else if (GET_RD(instr) == GET_RT(instr)) {
+        dasm_print(psx, instr, "sll", d_RD, STOP);
+    } else {
+        dasm_print(psx, instr, "sll", d_RD, d_RT, STOP);
+    }
+}
+
+void dasm_addiu(struct psx *psx, u32 instr)
+{
+    if (GET_RS(instr) == 0) {
+        dasm_print(psx, instr, "li", d_RT, d_IMM16, STOP);
+    } else if (GET_RT(instr) == GET_RS(instr)) {
+        dasm_print(psx, instr, "addiu", d_RT, d_IMM16, STOP);
+    } else {
+        dasm_print(psx, instr, "addiu", d_RT, d_RS, d_IMM16, STOP);
+    }
+}
+
+void dasm_j(struct psx *psx, u32 instr)
+{
+    dasm_print(psx, instr, "j", d_TARGET, STOP);
+}
+
+void dasm_or(struct psx *psx, u32 instr)
+{
+    if ((GET_RS(instr) == GET_RT(instr)) || (GET_RT(instr) == 0)) {
+        dasm_print(psx, instr, "move", d_RD, d_RS, STOP);
+    } else if (GET_RS(instr) == 0) {
+        dasm_print(psx, instr, "move", d_RD, d_RT, STOP);
+    } else if (GET_RD(instr) == GET_RS(instr)) {
+        dasm_print(psx, instr, "or", d_RD, d_RT, STOP);
+    } else {
+        dasm_print(psx, instr, "or", d_RD, d_RS, d_RT, STOP);
+    }
+}
+
+void sll(struct psx *psx, u32 instr)
+{
+    assert(GET_RD(instr) <= 31);
+    psx->regs[GET_RD(instr)] = GET_RT(instr) << GET_SHAMT(instr);
+}
+
+void sltu(struct psx *psx, u32 instr)
+{
+    psx->regs[GET_RD(instr)] =
+        (psx->regs[GET_RS(instr)] < psx->regs[GET_RT(instr)]);
+}
+
+void lui(struct psx *psx, u32 instr)
+{
+    u32 rt = GET_RT(instr);
+    psx->regs[rt] = instr << 16;
+}
+
+void jr(struct psx *psx, u32 instr)
+{
+    assert(psx->regs[GET_RS(instr)] % 4 == 0 && "unaligned address");
+    psx->next_pc = psx->regs[GET_RS(instr)];
+}
+
+void j(struct psx *psx, u32 instr)
+{
+    psx->next_pc = GET_TARGET(psx->pc, instr);
+}
+
+void jal(struct psx *psx, u32 instr)
+{
+    psx->next_pc = GET_TARGET(psx->pc, instr);
+    psx->ra = psx->addr_to_instr + 8;
+}
+
+void beq(struct psx *psx, u32 instr)
+{
+    if (psx->regs[GET_RS(instr)] == psx->regs[(GET_RT(instr))]) {
+        psx->next_pc = GET_BRANCH(psx->addr_to_instr, instr);
+    }
+}
+
+void bne(struct psx *psx, u32 instr)
+{
+    if (psx->regs[GET_RS(instr)] != psx->regs[(GET_RT(instr))]) {
+        psx->next_pc = psx->addr_to_instr + 4 + (GET_IMM16(instr) << 2);
+    }
+}
+
+void addiu(struct psx *psx, u32 instr)
+{
+    psx->regs[GET_RT(instr)] = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
+}
+
+void addi(struct psx *psx, u32 instr)
+{
+    i32 val = psx->regs[GET_RS(instr)];
+    i16 imm = GET_IMM16(instr);
     i64 sum = (i64)val + imm;
 
     if (INT_MAX < sum || sum < INT_MIN) {
         assert(false);
     }
 
-    psx->regs[GET_RT(opcode)] = sum;
+    psx->regs[GET_RT(instr)] = sum;
 }
 
-void add(struct psx *psx, u32 opcode)
+void add(struct psx *psx, u32 instr)
 {
-    i32 a = psx->regs[GET_RS(opcode)];
-    i32 b = psx->regs[GET_RT(opcode)];
+    i32 a = psx->regs[GET_RS(instr)];
+    i32 b = psx->regs[GET_RT(instr)];
     i64 sum = (i64)a + b;
 
     if (INT_MAX < sum || sum < INT_MIN) {
         assert(false);
     }
 
-    psx->regs[GET_RD(opcode)] = sum;
+    psx->regs[GET_RD(instr)] = sum;
 }
 
-void addu(struct psx *psx, u32 opcode)
+void addu(struct psx *psx, u32 instr)
 {
-    psx->regs[GET_RD(opcode)] =
-        psx->regs[GET_RS(opcode)] + psx->regs[GET_RT(opcode)];
+    psx->regs[GET_RD(instr)] =
+        psx->regs[GET_RS(instr)] + psx->regs[GET_RT(instr)];
 }
 
-void ori(struct psx *psx, u32 opcode)
+void ori(struct psx *psx, u32 instr)
 {
-    psx->regs[GET_RT(opcode)] = psx->regs[GET_RS(opcode)] | GET_UIMM16(opcode);
+    psx->regs[GET_RT(instr)] = psx->regs[GET_RS(instr)] | GET_UIMM16(instr);
 }
 
-void andi(struct psx *psx, u32 opcode)
+void andi(struct psx *psx, u32 instr)
 {
-    psx->regs[GET_RT(opcode)] = psx->regs[GET_RS(opcode)] & GET_UIMM16(opcode);
+    psx->regs[GET_RT(instr)] = psx->regs[GET_RS(instr)] & GET_UIMM16(instr);
 }
 
-void sb(struct psx *psx, u32 opcode)
+void sb(struct psx *psx, u32 instr)
 {
-    u32 addr = psx->regs[GET_RS(opcode)] + GET_SIMM16(opcode);
-    u16 value = psx->regs[GET_RT(opcode)] & 0xFF;
-    printf("\tstoring to memory at: 0x%08x, value: 0x%08x\n", addr, value);
+    u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
+    u16 value = psx->regs[GET_RT(instr)] & 0xFF;
+    // printf("\tstoring to memory at: 0x%08x, value: 0x%08x\n", addr, value);
 
     /* assuming machine is little endian */
     u8 *byte = &psx->addr[addr];
     byte[0] = value;
 }
 
-void sh(struct psx *psx, u32 opcode)
+void sh(struct psx *psx, u32 instr)
 {
-    u32 addr = psx->regs[GET_RS(opcode)] + GET_SIMM16(opcode);
+    u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
     /* has to be 2 bytes aligned */
     assert(addr % sizeof(u16) == 0);
 
-    u16 value = psx->regs[GET_RT(opcode)] & 0xFFFF;
-    printf("\tstoring to memory at: 0x%08x, value: 0x%08x\n", addr, value);
+    u16 value = psx->regs[GET_RT(instr)] & 0xFFFF;
+    // printf("\tstoring to memory at: 0x%08x, value: 0x%08x\n", addr, value);
 
     /* assuming machine is little endian */
     u16 *half_word = (u16 *)&psx->addr[addr];
     half_word[0] = value;
 }
 
-void sw(struct psx *psx, u32 opcode)
+void sw(struct psx *psx, u32 instr)
 {
-    u32 addr = psx->regs[GET_RS(opcode)] + GET_SIMM16(opcode);
-    printf("\tstoring to memory at: 0x%08x, value: 0x%08x\n", addr,
-           psx->regs[GET_RT(opcode)]);
+    u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
 
     /* has to be 4 bytes aligned */
     assert(addr % sizeof(u32) == 0);
 
-
     /* assuming machine is little endian */
     u32 *word = (u32 *)&psx->addr[addr];
-    word[0] = psx->regs[GET_RT(opcode)];
+    word[0] = psx->regs[GET_RT(instr)];
 }
 
-void lhu(struct psx *psx, u32 opcode)
+void lhu(struct psx *psx, u32 instr)
 {
     assert(false);
     /* has to be 2 bytes aligned */
-    u32 word = (i32)GET_SIMM16(opcode) + psx->regs[GET_RS(opcode)];
+    u32 word = (i32)GET_IMM16(instr) + psx->regs[GET_RS(instr)];
     assert(word % 2 == 0);
 
     printf("\tloading from memory at: 0x%08x, value: 0x%08x\n", word,
            *(u16 *)&psx->addr[word]);
 
     /* assuming machine is little endian */
-    psx->regs[GET_RT(opcode)] = *(u16 *)&psx->addr[word];
+    psx->regs[GET_RT(instr)] = *(u16 *)&psx->addr[word];
 }
 
-void and(struct psx *psx, u32 opcode)
+void and(struct psx *psx, u32 instr)
 {
-    psx->regs[GET_RD(opcode)] =
-        psx->regs[GET_RS(opcode)] & psx->regs[GET_RT(opcode)];
+    psx->regs[GET_RD(instr)] =
+        psx->regs[GET_RS(instr)] & psx->regs[GET_RT(instr)];
 }
 
-void or(struct psx *psx, u32 opcode)
+void or(struct psx *psx, u32 instr)
 {
-    psx->regs[GET_RD(opcode)] =
-        psx->regs[GET_RS(opcode)] | psx->regs[GET_RT(opcode)];
+    psx->regs[GET_RD(instr)] =
+        psx->regs[GET_RS(instr)] | psx->regs[GET_RT(instr)];
 }
 
-void lb(struct psx *psx, u32 opcode)
+void lb(struct psx *psx, u32 instr)
 {
-    u32 addr = (i32)GET_SIMM16(opcode) + psx->regs[GET_RS(opcode)];
+    u32 addr = (i32)GET_IMM16(instr) + psx->regs[GET_RS(instr)];
 
     u8 byte = psx->addr[addr];
 
-    printf("\tloading from memory at: 0x%08x, value: 0x%08x\n", addr, byte);
-
-    lds_push(psx->load_delay_slots, GET_RT(opcode), byte);
+    lds_push(psx->load_delay_slots, GET_RT(instr), byte);
 }
 
-void lw(struct psx *psx, u32 opcode)
+void lw(struct psx *psx, u32 instr)
 {
-    u32 addr = (i32)GET_SIMM16(opcode) + psx->regs[GET_RS(opcode)];
+    assert(false &&
+           "the bug is probably because I don't ignore loads when ISC = 1");
+    u32 addr = GET_IMM16(instr) + psx->regs[GET_RS(instr)];
     /* needs to be an exception if not 4 bytes aligned. */
     assert(addr % 4 == 0);
 
     /* assuming machine is little endian. change to memcpy. */
     u32 word = *(u32 *)&psx->addr[addr];
 
-    printf("\tloading from memory at: 0x%08x, value: 0x%08x\n", addr, word);
-
-    lds_push(psx->load_delay_slots, GET_RT(opcode), word);
+    lds_push(psx->load_delay_slots, GET_RT(instr), word);
 }
 
-void cop0_exec(struct psx *psx, u32 opcode)
+void cop0_exec(struct psx *psx, u32 instr)
 {
-    if (GET_RS(opcode) == 0) { // mfc0
-        lds_push(psx->load_delay_slots, GET_RT(opcode),
-                 psx->cop0[GET_RD(opcode)]);
-        printf("\tloading from cop0 at: %d, value: 0x%08x\n", GET_RD(opcode),
-               psx->cop0[GET_RD(opcode)]);
-    } else if (GET_RS(opcode) == 0b00100) { // mtc0 ignoring store delays
-        assert(GET_RD(opcode) < (sizeof(psx->cop0) / sizeof(psx->cop0[0])));
-        psx->cop0[GET_RD(opcode)] = psx->regs[GET_RT(opcode)];
+    if (GET_RS(instr) == 0) { // mfc0
+        assert(false);
+        lds_push(psx->load_delay_slots, GET_RT(instr),
+                 psx->cop0[GET_RD(instr)]);
+        printf("\tloading from cop0 at: %d, value: 0x%08x\n", GET_RD(instr),
+               psx->cop0[GET_RD(instr)]);
+    } else if (GET_RS(instr) == 0b00100) { // mtc0 ignoring store delays
+        assert(false);
+        assert(GET_RD(instr) < (sizeof(psx->cop0) / sizeof(psx->cop0[0])));
+        psx->cop0[GET_RD(instr)] = psx->regs[GET_RT(instr)];
 
-        printf("\tstoring to cop0 at: %d, value: 0x%08x\n", GET_RD(opcode),
-               psx->regs[GET_RT(opcode)]);
+        printf("\tstoring to cop0 at: %d, value: 0x%08x\n", GET_RD(instr),
+               psx->regs[GET_RT(instr)]);
     } else {
         assert(false);
     }
@@ -443,21 +615,13 @@ void start(struct psx *psx)
         &&h_na,      &&h_na,    &&h_na,  &&h_na,
     };
 
-    u32 opcode = 0;
+    u32 instr = 0;
     psx->pc = RESET_EXCEPTION_VECTOR;
     psx->next_pc = psx->pc + 4;
-    u32 addr_to_instr = psx->pc;
-
-#define DEBUG_INFO(symbol_name)                                                \
-    do {                                                                       \
-        printf("pc: 0x%08x, %s, opcode: 0x%08x, primary: 0x%02x, secondary: "  \
-               "0x%02x\n",                                                     \
-               psx->pc, symbol_name, opcode, GET_PRIMARY(opcode),              \
-               GET_SECONDARY(opcode));                                         \
-    } while (0)
 
 #define PRE_OP()                                                               \
     do {                                                                       \
+        psx->addr_to_instr = psx->pc;                                          \
         psx->pc = psx->next_pc;                                                \
         psx->next_pc = psx->pc + 4;                                            \
     } while (0)
@@ -471,299 +635,248 @@ void start(struct psx *psx)
 #define DISPATCH()                                                             \
     do {                                                                       \
         assert(psx->zero == 0);                                                \
-        opcode = *((u32 *)&psx->memmap[psx->pc]); /* m1 is little endian */    \
-        assert(GET_PRIMARY(opcode) <                                           \
+        instr = *((u32 *)&psx->memmap[psx->pc]); /* m1 is little endian */     \
+        assert(GET_OPCODE(instr) <                                             \
                sizeof(dispatch_tbl) / sizeof(dispatch_tbl[0]));                \
-        if (GET_PRIMARY(opcode) != 0) {                                        \
-            goto *dispatch_tbl[GET_PRIMARY(opcode)];                           \
+        if (GET_OPCODE(instr) != 0) {                                          \
+            goto *dispatch_tbl[GET_OPCODE(instr)];                             \
         } else {                                                               \
-            assert(GET_SECONDARY(opcode) <                                     \
+            assert(GET_FUNCT(instr) <                                          \
                    sizeof(sp_dispatch_tbl) / sizeof(sp_dispatch_tbl[0]));      \
-            goto *sp_dispatch_tbl[GET_SECONDARY(opcode)];                      \
+            goto *sp_dispatch_tbl[GET_FUNCT(instr)];                           \
         }                                                                      \
     } while (0)
 
     DISPATCH();
 
 h_bcondz:
-    DEBUG_INFO("h_bcondz");
     assert(false);
 h_j:
-    DEBUG_INFO("h_j");
-    psx->pc = psx->next_pc;
-    j(psx, opcode);
+    PRE_OP();
+    dasm_j(psx, instr);
+    j(psx, instr);
     POST_OP();
     DISPATCH();
 h_jal:
-    DEBUG_INFO("h_jal");
-    addr_to_instr = psx->pc;
-    psx->pc = psx->next_pc;
-    jal(psx, addr_to_instr, opcode);
+    assert(false);
+    PRE_OP();
+    jal(psx, instr);
     POST_OP();
     DISPATCH();
 h_beq:
-    DEBUG_INFO("h_beq");
-    addr_to_instr = psx->pc;
+    assert(false);
     PRE_OP();
-    beq(psx, addr_to_instr, opcode);
+    beq(psx, instr);
     POST_OP();
     DISPATCH();
 h_bne:
-    DEBUG_INFO("h_bne");
-    addr_to_instr = psx->pc;
+    assert(false);
     PRE_OP();
-    bne(psx, addr_to_instr, opcode);
+    bne(psx, instr);
     POST_OP();
     DISPATCH();
 h_blez:
-    DEBUG_INFO("h_blez");
     assert(false);
 h_bgtz:
-    DEBUG_INFO("h_bgtz");
     assert(false);
 h_addi:
-    DEBUG_INFO("h_addi");
+    assert(false);
     PRE_OP();
-    addi(psx, opcode);
+    addi(psx, instr);
     POST_OP();
     DISPATCH();
 h_addiu:
-    DEBUG_INFO("h_addiu");
     PRE_OP();
-    addiu(psx, opcode);
+    dasm_addiu(psx, instr);
+    addiu(psx, instr);
     POST_OP();
     DISPATCH();
 h_slti:
-    DEBUG_INFO("h_slti");
     assert(false);
 h_sltiu:
-    DEBUG_INFO("h_sltiu");
     assert(false);
 h_andi:
-    DEBUG_INFO("h_andi");
+    assert(false);
     PRE_OP();
-    andi(psx, opcode);
+    andi(psx, instr);
     POST_OP();
     DISPATCH();
 h_ori:
-    DEBUG_INFO("h_ori");
     PRE_OP();
-    ori(psx, opcode);
+    dasm_ori(psx, instr);
+    ori(psx, instr);
     POST_OP();
     DISPATCH();
 h_xori:
-    DEBUG_INFO("h_xori");
     assert(false);
 h_lui:
-    DEBUG_INFO("h_lui");
     PRE_OP();
-    lui(psx, opcode);
+    dasm_lui(psx, instr);
+    lui(psx, instr);
     POST_OP();
     DISPATCH();
 h_cop0:
-    DEBUG_INFO("h_cop0");
+    assert(false);
     PRE_OP();
-    cop0_exec(psx, opcode);
+    cop0_exec(psx, instr);
     POST_OP();
     DISPATCH();
 h_cop1:
-    DEBUG_INFO("h_cop1");
     assert(false);
 h_cop2:
-    DEBUG_INFO("h_cop2");
     assert(false);
 h_cop3:
-    DEBUG_INFO("h_cop3");
     assert(false);
 h_lb:
-    DEBUG_INFO("h_lb");
+    assert(false);
     PRE_OP();
-    lb(psx, opcode);
+    lb(psx, instr);
     POST_OP();
     DISPATCH();
-    assert(false);
 h_lh:
-    DEBUG_INFO("h_lh");
     assert(false);
 h_lwl:
-    DEBUG_INFO("h_lwl");
     assert(false);
 h_lw:
-    DEBUG_INFO("h_lw");
+    assert(false);
     PRE_OP();
-    lw(psx, opcode);
+    lw(psx, instr);
     POST_OP();
     DISPATCH();
 h_lbu:
-    DEBUG_INFO("h_lbu");
     assert(false);
 h_lhu:
-    DEBUG_INFO("h_lhu");
     assert(false);
     PRE_OP();
-    lhu(psx, opcode);
+    lhu(psx, instr);
     POST_OP();
     DISPATCH();
 h_lwr:
-    DEBUG_INFO("h_lwr");
     assert(false);
 h_sb:
-    DEBUG_INFO("h_sb");
+    assert(false);
     PRE_OP();
-    sb(psx, opcode);
+    sb(psx, instr);
     POST_OP();
     DISPATCH();
 h_sh:
-    DEBUG_INFO("h_sh");
+    assert(false);
     PRE_OP();
-    sh(psx, opcode);
+    sh(psx, instr);
     POST_OP();
     DISPATCH();
 h_swl:
-    DEBUG_INFO("h_swl");
     assert(false);
 h_sw:
-    DEBUG_INFO("h_sw");
     PRE_OP();
-    sw(psx, opcode);
+    dasm_sw(psx, instr);
+    sw(psx, instr);
     POST_OP();
     DISPATCH();
 h_swr:
-    DEBUG_INFO("h_swr");
     assert(false);
 h_lwc0:
-    DEBUG_INFO("h_lwc0");
     assert(false);
 h_lwc1:
-    DEBUG_INFO("h_lwc1");
     assert(false);
 h_lwc2:
-    DEBUG_INFO("h_lwc2");
     assert(false);
 h_lwc3:
-    DEBUG_INFO("h_lwc3");
     assert(false);
 h_swc0:
-    DEBUG_INFO("h_swc0");
     assert(false);
 h_swc1:
-    DEBUG_INFO("h_swc1");
     assert(false);
 h_swc2:
-    DEBUG_INFO("h_swc2");
     assert(false);
 h_swc3:
-    DEBUG_INFO("h_swc3");
     assert(false);
 /* special */
 h_sll:
-    DEBUG_INFO("h_sll");
     PRE_OP();
-    sll(psx, opcode);
+    dasm_sll(psx, instr);
+    sll(psx, instr);
     POST_OP();
     DISPATCH();
 h_srl:
-    DEBUG_INFO("h_srl");
     assert(false);
 h_sra:
-    DEBUG_INFO("h_sra");
     assert(false);
 h_sllv:
-    DEBUG_INFO("h_sllv");
     assert(false);
 h_srlv:
-    DEBUG_INFO("h_srlv");
     assert(false);
 h_srav:
-    DEBUG_INFO("h_srav");
     assert(false);
 h_jr:
-    DEBUG_INFO("h_jr");
-    psx->pc = psx->next_pc;
-    jr(psx, opcode);
+    assert(false);
+    PRE_OP();
+    jr(psx, instr);
     POST_OP();
     DISPATCH();
-    assert(false);
 h_jalr:
-    DEBUG_INFO("h_jalr");
     assert(false);
 h_syscall:
-    DEBUG_INFO("h_syscall");
     assert(false);
 h_break:
-    DEBUG_INFO("h_break");
     assert(false);
 h_mfhi:
-    DEBUG_INFO("h_mfhi");
     assert(false);
 h_mthi:
-    DEBUG_INFO("h_mthi");
     assert(false);
 h_mflo:
-    DEBUG_INFO("h_mflo");
     assert(false);
 h_mtlo:
-    DEBUG_INFO("h_mtlo");
     assert(false);
 h_mult:
-    DEBUG_INFO("h_mult");
     assert(false);
 h_multu:
-    DEBUG_INFO("h_multu");
     assert(false);
 h_div:
-    DEBUG_INFO("h_div");
     assert(false);
 h_divu:
-    DEBUG_INFO("h_divu");
     assert(false);
 h_add:
-    DEBUG_INFO("h_add");
+    assert(false);
     PRE_OP();
-    add(psx, opcode);
+    add(psx, instr);
     POST_OP();
     DISPATCH();
 h_addu:
-    DEBUG_INFO("h_addu");
+    assert(false);
     PRE_OP();
-    addu(psx, opcode);
+    addu(psx, instr);
     POST_OP();
     DISPATCH();
 h_sub:
-    DEBUG_INFO("h_sub");
     assert(false);
 h_subu:
-    DEBUG_INFO("h_subu");
     assert(false);
 h_and:
-    DEBUG_INFO("h_and");
+    assert(false);
     PRE_OP();
-    and(psx, opcode);
+    and(psx, instr);
     POST_OP();
     DISPATCH();
 h_or:
-    DEBUG_INFO("h_or");
     PRE_OP();
-    or(psx, opcode);
+    dasm_or(psx, instr);
+    or(psx, instr);
     POST_OP();
     DISPATCH();
 h_xor:
-    DEBUG_INFO("h_xor");
     assert(false);
 h_nor:
-    DEBUG_INFO("h_nor");
     assert(false);
 h_slt:
-    DEBUG_INFO("h_slt");
     assert(false);
 h_sltu:
-    DEBUG_INFO("h_sltu");
+    assert(false);
     PRE_OP();
-    sltu(psx, opcode);
+    sltu(psx, instr);
     POST_OP();
     DISPATCH();
 h_na:
-    DEBUG_INFO("h_na");
     assert(false);
 
 #undef DISPATCH
@@ -805,34 +918,6 @@ void make_kseg(vm_address_t base_kseg, mem_entry_name_port_t shared_ram,
     u8 *bios = mmap((u8 *)base_kseg + BASE_BIOS_ADDR, BIOS_SIZE, PROT_READ,
                     MAP_PRIVATE | MAP_FIXED, bios_fd, 0);
     CHECK_ERR(bios == MAP_FAILED, "error allocating bios space: %d\n", errno);
-}
-
-void test_addr_space(u8 *base)
-{
-    base[0] = 'A';
-    base[1] = 'S';
-    base[2] = 'S';
-    assert(memcmp(base, base + KSEG0_START, 3) == 0);
-    assert(memcmp(base, base + KSEG1_START, 3) == 0);
-    assert(memcmp(base, base + RAM_SIZE, 3) == 0);
-    assert(memcmp(base, base + 2 * RAM_SIZE, 3) == 0);
-
-    assert(memcmp(base + BASE_BIOS_ADDR, base + KSEG0_START + BASE_BIOS_ADDR,
-                  8) == 0);
-    assert(memcmp(base + BASE_BIOS_ADDR, base + RESET_EXCEPTION_VECTOR, 8) ==
-           0);
-
-    base[BASE_EXPANSION_REGION1_ADDR] = 'A';
-    assert(memcmp(base + BASE_EXPANSION_REGION1_ADDR,
-                  base + KSEG0_START + BASE_EXPANSION_REGION1_ADDR, 1) == 0);
-    assert(memcmp(base + BASE_EXPANSION_REGION1_ADDR,
-                  base + KSEG1_START + BASE_EXPANSION_REGION1_ADDR, 1) == 0);
-
-    base[BASE_IO_PORTS_ADDR] = 'A';
-    assert(memcmp(base + BASE_IO_PORTS_ADDR,
-                  base + KSEG0_START + BASE_IO_PORTS_ADDR, 1) == 0);
-    assert(memcmp(base + BASE_IO_PORTS_ADDR,
-                  base + KSEG1_START + BASE_IO_PORTS_ADDR, 1) == 0);
 }
 
 void *make_psx_addr_space()
@@ -887,8 +972,6 @@ void *make_psx_addr_space()
     ret = mach_port_deallocate(mach_task_self(), shared_io);
     CHECK_ERR(ret != KERN_SUCCESS, "error deallocating shared_io: %d\n", ret);
     close(bios_fd);
-
-    test_addr_space((u8 *)addr);
 
     return (void *)addr;
 }
