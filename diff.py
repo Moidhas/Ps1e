@@ -2,28 +2,25 @@ import argparse
 from pathlib import Path
 
 def main():
-    # 1. Set up the argument parser
     parser = argparse.ArgumentParser(description="diff checker")
     
-    # 2. Add the file path argument
     parser.add_argument("psx", type=str, help="psx file path")
     parser.add_argument("pcsx", type=str, help="pcsx file path")
     
-    # 3. Parse the arguments
     args = parser.parse_args()
     
-    # 4. Handle the path safely using pathlib
     psx_path = Path(args.psx)
     pcsx_path = Path(args.pcsx)
     
-    # 5. Check if the file exists before processing
     if psx_path.is_file() and pcsx_path.is_file():
         with open(psx_path, "r", encoding="utf-8") as psx, open(pcsx_path, "r", encoding="utf-8") as pcsx:
-            for psx_line, pcsx_line in zip(psx, pcsx):
-                if psx_line != pcsx_line:
-                    print(f"Got: {psx_line}\n Wanted: {pcsx_line}")
-                    return
-            print("NO DIFF!\n")
+            for line_num, (psx_line, pcsx_line) in enumerate(zip(psx, pcsx), start=1):
+                    if psx_line != pcsx_line:
+                        got_clean = psx_line.rstrip('\r\n')
+                        wanted_clean = pcsx_line.rstrip('\r\n')
+                        print(f"Line {line_num:<6} | Got:    {got_clean}")
+                        print(f"Line {line_num:<6} | Wanted: {wanted_clean}")
+                        print("-" * 40)
     else:
         if not psx_path.is_file():
             print(f"Error: The file '{psx_path}' does not exist.")
