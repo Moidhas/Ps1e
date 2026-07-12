@@ -23,7 +23,8 @@ typedef int8_t i8;
 
 /* DEBUG RELATED MACROS */
 #define DEBUG 1 // not 0 debug, 0 no debug.
-// always 7 spaces between opcode and register fields in debug format.
+                
+/* always 7 spaces between opcode and register fields in debug format. */
 #define OPCODE_ALIGNMENT 7
 
 /* all of these are in bytes. */
@@ -947,7 +948,6 @@ void sb(struct psx *psx, u32 instr)
         printf("BIOS Trace1: 0x%02x\n", value);
     }
 
-    /* assuming machine is little endian */
     u8 *byte = &(psx->addr[addr]);
     byte[0] = value;
 }
@@ -960,8 +960,7 @@ void sh(struct psx *psx, u32 instr)
 
     u16 value = psx->regs[GET_RT(instr)] & 0xFFFF;
 
-    /* assuming machine is little endian */
-    u16 *half_word = (u16 *)(&(psx->addr[addr]));
+    u16 *half_word = GET_HALFWORD_PTR(psx->addr[addr]);
     half_word[0] = value;
 }
 
@@ -972,8 +971,7 @@ void sw(struct psx *psx, u32 instr)
     /* has to be 4 bytes aligned */
     assert(addr % sizeof(u32) == 0);
 
-    /* assuming machine is little endian */
-    u32 *word = (u32 *)(&(psx->addr[addr]));
+    u32 *word = GET_WORD_PTR(psx->addr[addr]);
     word[0] = psx->regs[GET_RT(instr)];
 }
 
@@ -1071,6 +1069,30 @@ void rfe(struct psx *psx, u32 instr)
     psx->sr = (psx->sr & ~0x3f) | ((psx->sr & 0x3f) >> 2);
 }
 
+void bios_functions(struct psx *psx)
+{
+    static u16 len;
+    static char buf[4 * KB];
+
+    u32 addr = PADDR(psx->addr_to_instr);
+    u8 func_number = psx->t1 & 0xFF;
+
+    if ((addr == 0xa0 && func_number == 0x3c) ||
+        (addr == 0xb0 && func_number == 0x3d)) {
+        char c = psx->a0;
+        buf[len] = c;
+        if (buf[len] == '\n' || len == ((4 * KB) - 2)) {
+            buf[len + 1] = 0;
+            printf("%s", buf);
+            len = 0;
+        } else {
+            ++len;
+        }
+    }
+
+    assert(len < 4 * KB);
+}
+
 void start(struct psx *psx)
 {
     static void *dispatch_tbl[] = {
@@ -1131,6 +1153,7 @@ void start(struct psx *psx)
     do {                                                                       \
         assert(psx->r0 == 0);                                                  \
         psx->addr_to_instr = psx->pc;                                          \
+        bios_functions(psx);                                                   \
         psx->pc = psx->next_pc;                                                \
         psx->next_pc = psx->pc + 4;                                            \
     } while (0)
