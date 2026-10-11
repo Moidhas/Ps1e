@@ -4,3 +4,4 @@ BIOS/*
 yo
 *.txt
 compile_flags.txt
+.DS_Store

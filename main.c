@@ -23,11 +23,33 @@ typedef int32_t i32;
 typedef int16_t i16;
 typedef int8_t i8;
 
+#define Assert(e, sym)                                                         \
+    do {                                                                       \
+        if (__builtin_expect(!(e), 0)) {                                       \
+            dasm_##sym(psx, instr);                                            \
+            assert(e);                                                         \
+        }                                                                      \
+    } while (0)
+
 /* DEBUG RELATED MACROS */
 #define DEBUG 1 // not 0 debug, 0 no debug.
 
 /* always 7 spaces between opcode and register fields in debug format. */
 #define OPCODE_ALIGNMENT 7
+
+#define type_last_bit(t) ((t)1 << (8 * sizeof(t) - 1))
+#define utype_max(t) ((t)(type_last_bit(t) + (type_last_bit(t) - 1)))
+#define BUILD_BUG_ON_ZERO(e) (sizeof(struct { int : -!!(e); }))
+#define GENMASK_TYPE(t, h, l)                                                  \
+    ((t)(BUILD_BUG_ON_ZERO((l) > (h)) + (utype_max(t) << (l)) &                \
+         (utype_max(t) >> (8 * sizeof(t) - 1 - (h)))))
+
+#define GENMASK_U8(h, l) GENMASK_TYPE(u8, h, l)
+#define GENMASK_U16(h, l) GENMASK_TYPE(u16, h, l)
+#define GENMASK_U32(h, l) GENMASK_TYPE(u32, h, l)
+#define GENMASK(h, l) GENMASK_U32(h, l)
+#define FIELD_GET(_mask, _reg)                                                 \
+    ((typeof(_mask))(((_reg) & (_mask)) >> __builtin_ctzll(_mask)))
 
 /* all of these are in bytes. */
 #define KB (1 << 10)
@@ -60,8 +82,35 @@ typedef int8_t i8;
 #define GENERAL_VECTOR 0x80000080
 #define BASE_IO_PORTS_ADDR 0x1F801000
 
+#define GP1_RESET (0x14802000)
 #define GP0 (0x1f801810)
+#define GP_CMD (0xff000000)
+#define DRAW_MODE_SETTINGS (0xe1 << 24)
 #define GP1 (0x1f801814)
+#define D0_CHCR (0x1F801088)
+#define D2_CHCR (D0_CHCR + 2 * 0x10)
+#define D6_CHCR (D0_CHCR + 6 * 0x10)
+
+#define D0_MADR (0x1f801080)
+#define D6_MADR (D0_MADR + 6 * 0x10)
+
+#define D6_BCR (0x1f8010e4)
+#define DICR (0x1f8010f4)
+
+/* DMA Channel Control flags
+ * for documentation: https://psx-spx.consoledev.net/ps1/system/dmachannels/ */
+enum D_CHCR_FLAGS : u32 {
+    TRANSFER_DIRECTION = 1 << 0,
+    MADR_INC = 1 << 1,
+    MODE_CAPABILITY = 1 << 8,
+    SYNC_MODE = GENMASK(10, 9),
+    CHOPPING_DMA_WINDOW_SIZE = GENMASK(18, 16),
+    CHOPPING_CPU_WINDOW_SIZE = GENMASK(22, 20),
+    START_TRANSFER = 1 << 24,
+    FORCE_TRANSFER_START = 1 << 28,
+    PAUSE_OR_HOLD_FORCED = 1 << 29,
+    BUS_SNOOPING = 1 << 30,
+};
 
 #define PADDR(vaddr) ((vaddr) & 0x1FFFFFFF)
 
@@ -90,12 +139,20 @@ typedef int8_t i8;
 /* COP0 MACROS */
 #define SR_GET_ISC(sr) (((sr) >> 16) & 0x1)
 
-/* technically I think this should take care of address mirrors and whatnot */
 #define IS_DCHR(addr)                                                          \
     ({                                                                         \
         bool _val = false;                                                     \
         for (int _n = 0; _n <= 6; ++_n) {                                      \
             _val = _val || (addr == (0x1f801088 + _n * 0x10));                 \
+        }                                                                      \
+        _val;                                                                  \
+    })
+
+#define IS_DMADR(addr)                                                         \
+    ({                                                                         \
+        bool _val = false;                                                     \
+        for (int _n = 0; _n <= 6; ++_n) {                                      \
+            _val = _val || (addr == (0x1f801080 + _n * 0x10));                 \
         }                                                                      \
         _val;                                                                  \
     })
@@ -115,7 +172,8 @@ typedef int8_t i8;
         }                                                                      \
     } while (0)
 
-size_t get_page_size()
+size_t
+get_page_size()
 {
     static size_t page_size = 0;
     if (page_size == 0) {
@@ -210,7 +268,45 @@ struct psx {
         };
     };
 
+    /* gpustat bitfield
+     * For documentation:
+     * https://psx-spx.consoledev.net/ps1/gpu/status-register/ */
+#define TBX GENMASK(3, 0)
+#define TBY (1 << 4)
+#define ABR GENMASK(6, 5)
+#define TPF GENMASK(8, 7)
+#define DTD (1 << 9)
+#define DFE (1 << 10)
+#define PBW (1 << 11)
+#define PBC (1 << 12)
+#define ODE2 (1 << 13)
+#define REV (1 << 14)
+#define TBY2 (1 << 15)
+#define HDS2 (1 << 16)
+#define HDS GENMASK(18, 17)
+#define VDS (1 << 19)
+#define NPB (1 << 20)
+#define LBS (1 << 21)
+#define IRS (1 << 22)
+#define DMSK (1 << 23)
+#define IRQ (1 << 24)
+#define DREQ (1 << 25)
+#define IDLE (1 << 26)
+#define RFFL (1 << 27)
+#define WFEP (1 << 28)
+#define DMD GENMASK(30, 29)
+#define ODE (1 << 31)
+
     u32 gpustat;
+
+    u32 dma_chcr[7];
+    /* dma_madr[i], The memory address the DMA will start reading from/writing
+     * to, for channel i.*/
+    u32 dma_madr[7];
+
+    u32 dma_bcr[7];
+
+    u32 dicr;
 
     /* The register that the last executed instruction modified,
      * if no registers were modified then 0. This includes delayed modification
@@ -229,16 +325,30 @@ struct psx {
         u32 value;
     } load_delay_slots[2];
 
+    /* interrupt status/mask register */
+#define I_STAT (0x1f801070)
+#define I_MASK (0x1f801074)
+    u32 i_stat;
+    u32 i_mask;
+
     union {
         u32 cop0[16];
         struct {
-            u32 useless[3];
+            u32 _na[3];
+            u32 bpc; /* Breakpoint Program Counter (R/W) */
+            u32 _na0;
+            u32 bda;    /* Breakpoint Data Address (R/W) */
             u32 target; /* In branch delay slot, this hold the target address of
                            the branch. (R) */
-            u32 useless1[8];
+            u32 dcic;   /* Debug and Cache Invalidate Control (R/W) */
+            u32 bada;   /* Bad Address (R) */
+            u32 bdam;   /* Breakpoint Data Address Mask	(R/W) */
+            u32 _na1;
+            u32 bpcm;  /* Breakpoint Program Counter Mask	(R/W) */
             u32 sr;    /* System status register (R/W) */
-            u32 cause; /* Cause of the last exception (R) */
+            u32 cause; /* Cause of the last exception (R, except bits 8-9 are R/W) */
             u32 epc;   /* Exception Program Counter (R) */
+            u32 prid;  /* Processor Revision Identifier (R) */
         };
     };
 
@@ -266,15 +376,16 @@ struct psx {
     u8 *isolated_cache;
 };
 
-static inline u32 gen_cause(enum exc_code code, u8 branch_taken,
-                            u8 branch_delay)
+static inline u32
+gen_cause(enum exc_code code, u8 branch_taken, u8 branch_delay)
 {
     return (branch_delay << 31) | (branch_taken << 30) | (code << 2);
 }
 
 /* I treat zero as empty technically this could fail if you load zero into this
  * but for now idc. */
-struct load_delay_slot lds_pop(struct load_delay_slot lds[2])
+struct load_delay_slot
+lds_pop(struct load_delay_slot lds[2])
 {
     struct load_delay_slot top = lds[0];
 
@@ -289,7 +400,8 @@ struct load_delay_slot lds_pop(struct load_delay_slot lds[2])
 
 /* This is used to handle the scenario where the instruction in the load delay
  * slot is writing to the same register as the load instruction. */
-void lds_sanity_clear(struct load_delay_slot lds[2], u8 last_modified_reg)
+void
+lds_sanity_clear(struct load_delay_slot lds[2], u8 last_modified_reg)
 {
     if (lds[0].reg_index == last_modified_reg) {
         lds[0].reg_index = 0;
@@ -298,7 +410,8 @@ void lds_sanity_clear(struct load_delay_slot lds[2], u8 last_modified_reg)
 }
 
 /* just push into back load delay slot. */
-void lds_push(struct load_delay_slot lds[2], u32 reg_index, u32 value)
+void
+lds_push(struct load_delay_slot lds[2], u32 reg_index, u32 value)
 {
     if (reg_index == 0) {
         lds[1].reg_index = 0;
@@ -309,7 +422,8 @@ void lds_push(struct load_delay_slot lds[2], u32 reg_index, u32 value)
     }
 }
 
-static inline void print_imm16(i16 imm)
+static inline void
+print_imm16(i16 imm)
 {
     if (imm < 0) {
         printf("-0x%04x", -imm);
@@ -318,21 +432,24 @@ static inline void print_imm16(i16 imm)
     }
 }
 
-static inline void print_word(struct psx *psx, u32 instr)
+static inline void
+print_word(struct psx *psx, u32 instr)
 {
     u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
     u32 word = *GET_WORD_PTR(psx->memmap[addr]);
     printf("([%08x] = %08x)", addr, word);
 }
 
-static inline void print_halfword(struct psx *psx, u32 instr)
+static inline void
+print_halfword(struct psx *psx, u32 instr)
 {
     u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
     u16 halfword = *GET_HALFWORD_PTR(psx->memmap[addr]);
     printf("([%08x] = %04x)", addr, halfword);
 }
 
-static inline void print_byte(struct psx *psx, u32 instr)
+static inline void
+print_byte(struct psx *psx, u32 instr)
 {
     u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
     u8 byte = psx->memmap[addr];
@@ -358,7 +475,8 @@ enum dasm_op {
     STOP,
 };
 
-void dasm_print(struct psx *psx, u32 instr, const char *sym, ...)
+void
+dasm_print(struct psx *psx, u32 instr, const char *sym, ...)
 {
     printf("%08x %08x: %-*s", psx->addr_to_instr, instr, OPCODE_ALIGNMENT, sym);
 
@@ -434,12 +552,14 @@ void dasm_print(struct psx *psx, u32 instr, const char *sym, ...)
     printf("\n");
 }
 
-void dasm_lui(struct psx *psx, u32 instr)
+void
+dasm_lui(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "lui", d_RT, d_UIMM16, STOP);
 }
 
-void dasm_ori(struct psx *psx, u32 instr)
+void
+dasm_ori(struct psx *psx, u32 instr)
 {
     if (GET_RS(instr) == 0) {
         dasm_print(psx, instr, "li", d_RT, d_UIMM16, STOP);
@@ -450,7 +570,8 @@ void dasm_ori(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_andi(struct psx *psx, u32 instr)
+void
+dasm_andi(struct psx *psx, u32 instr)
 {
     if (GET_RS(instr) == GET_RT(instr)) {
         dasm_print(psx, instr, "andi", d_RT, d_UIMM16, STOP);
@@ -459,47 +580,56 @@ void dasm_andi(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_sw(struct psx *psx, u32 instr)
+void
+dasm_sw(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "sw", d_RT, d_WORD, STOP);
 }
 
-void dasm_sh(struct psx *psx, u32 instr)
+void
+dasm_sh(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "sh", d_RT, d_HALFWORD, STOP);
 }
 
-void dasm_sb(struct psx *psx, u32 instr)
+void
+dasm_sb(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "sb", d_RT, d_BYTE, STOP);
 }
 
-void dasm_lw(struct psx *psx, u32 instr)
+void
+dasm_lw(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "lw", d_RT, d_WORD, STOP);
 }
 
-void dasm_lb(struct psx *psx, u32 instr)
+void
+dasm_lb(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "lb", d_RT, d_BYTE, STOP);
 }
 
-void dasm_lh(struct psx *psx, u32 instr)
+void
+dasm_lh(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "lh", d_RT, d_HALFWORD, STOP);
 }
 
-void dasm_lbu(struct psx *psx, u32 instr)
+void
+dasm_lbu(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "lbu", d_RT, d_BYTE, STOP);
 }
 
-void dasm_lhu(struct psx *psx, u32 instr)
+void
+dasm_lhu(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "lhu", d_RT, d_HALFWORD, STOP);
 }
 
-void dasm_sll(struct psx *psx, u32 instr)
+void
+dasm_sll(struct psx *psx, u32 instr)
 {
     if (instr == 0) {
         dasm_print(psx, instr, "nop", STOP);
@@ -510,7 +640,8 @@ void dasm_sll(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_sllv(struct psx *psx, u32 instr)
+void
+dasm_sllv(struct psx *psx, u32 instr)
 {
     if (GET_RD(instr) == GET_RT(instr)) {
         dasm_print(psx, instr, "sllv", d_RD, d_RS, STOP);
@@ -519,7 +650,8 @@ void dasm_sllv(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_srlv(struct psx *psx, u32 instr)
+void
+dasm_srlv(struct psx *psx, u32 instr)
 {
     if (GET_RD(instr) == GET_RT(instr)) {
         dasm_print(psx, instr, "srlv", d_RD, d_RS, STOP);
@@ -528,7 +660,8 @@ void dasm_srlv(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_srav(struct psx *psx, u32 instr)
+void
+dasm_srav(struct psx *psx, u32 instr)
 {
     if (GET_RD(instr) == GET_RT(instr)) {
         dasm_print(psx, instr, "srav", d_RD, d_RS, STOP);
@@ -537,7 +670,8 @@ void dasm_srav(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_srl(struct psx *psx, u32 instr)
+void
+dasm_srl(struct psx *psx, u32 instr)
 {
     if (GET_RD(instr) == GET_RT(instr)) {
         dasm_print(psx, instr, "srl", d_RD, d_SHAMT, STOP);
@@ -546,7 +680,8 @@ void dasm_srl(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_sra(struct psx *psx, u32 instr)
+void
+dasm_sra(struct psx *psx, u32 instr)
 {
     if (GET_RD(instr) == GET_RT(instr)) {
         dasm_print(psx, instr, "sra", d_RD, d_SHAMT, STOP);
@@ -555,7 +690,8 @@ void dasm_sra(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_addiu(struct psx *psx, u32 instr)
+void
+dasm_addiu(struct psx *psx, u32 instr)
 {
     if (GET_RS(instr) == 0) {
         dasm_print(psx, instr, "li", d_RT, d_IMM16, STOP);
@@ -566,7 +702,8 @@ void dasm_addiu(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_addi(struct psx *psx, u32 instr)
+void
+dasm_addi(struct psx *psx, u32 instr)
 {
     if (GET_RT(instr) == GET_RS(instr)) {
         dasm_print(psx, instr, "addi", d_RT, d_IMM16, STOP);
@@ -575,22 +712,26 @@ void dasm_addi(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_j(struct psx *psx, u32 instr)
+void
+dasm_j(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "j", d_TARGET, STOP);
 }
 
-void dasm_jr(struct psx *psx, u32 instr)
+void
+dasm_jr(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "jr", d_RS, STOP);
 }
 
-void dasm_jal(struct psx *psx, u32 instr)
+void
+dasm_jal(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "jal", d_TARGET, STOP);
 }
 
-void dasm_jalr(struct psx *psx, u32 instr)
+void
+dasm_jalr(struct psx *psx, u32 instr)
 {
     if (GET_RD(instr) == 31) {
         dasm_print(psx, instr, "jalr", d_RS, STOP);
@@ -599,7 +740,8 @@ void dasm_jalr(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_nor(struct psx *psx, u32 instr)
+void
+dasm_nor(struct psx *psx, u32 instr)
 {
     if (GET_RT(instr) == 0) {
         if (GET_RD(instr) != GET_RS(instr)) {
@@ -622,7 +764,8 @@ void dasm_nor(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_or(struct psx *psx, u32 instr)
+void
+dasm_or(struct psx *psx, u32 instr)
 {
     if ((GET_RS(instr) == GET_RT(instr)) || (GET_RT(instr) == 0)) {
         dasm_print(psx, instr, "move", d_RD, d_RS, STOP);
@@ -635,7 +778,8 @@ void dasm_or(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_and(struct psx *psx, u32 instr)
+void
+dasm_and(struct psx *psx, u32 instr)
 {
     if (GET_RD(instr) == GET_RS(instr)) {
         dasm_print(psx, instr, "and", d_RD, d_RT, STOP);
@@ -644,17 +788,20 @@ void dasm_and(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_mtc0(struct psx *psx, u32 instr)
+void
+dasm_mtc0(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "mtc0", d_COP0_RD, d_RT, STOP);
 }
 
-void dasm_mfc0(struct psx *psx, u32 instr)
+void
+dasm_mfc0(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "mfc0", d_RT, d_COP0_RD, STOP);
 }
 
-void dasm_bne(struct psx *psx, u32 instr)
+void
+dasm_bne(struct psx *psx, u32 instr)
 {
     if (GET_RS(instr) == 0) {
         dasm_print(psx, instr, "bnez", d_RT, d_BRANCH, STOP);
@@ -665,7 +812,8 @@ void dasm_bne(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_beq(struct psx *psx, u32 instr)
+void
+dasm_beq(struct psx *psx, u32 instr)
 {
     if (GET_RS(instr) == GET_RT(instr)) {
         dasm_print(psx, instr, "b", d_BRANCH, STOP);
@@ -678,22 +826,26 @@ void dasm_beq(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_bgtz(struct psx *psx, u32 instr)
+void
+dasm_bgtz(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "bgtz", d_RS, d_BRANCH, STOP);
 }
 
-void dasm_blez(struct psx *psx, u32 instr)
+void
+dasm_blez(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "blez", d_RS, d_BRANCH, STOP);
 }
 
-void dasm_bltz(struct psx *psx, u32 instr)
+void
+dasm_bltz(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "bltz", d_RS, d_BRANCH, STOP);
 }
 
-void dasm_bgez(struct psx *psx, u32 instr)
+void
+dasm_bgez(struct psx *psx, u32 instr)
 {
     if (GET_RS(instr) == 0) {
         dasm_print(psx, instr, "b", d_BRANCH, STOP);
@@ -702,7 +854,8 @@ void dasm_bgez(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_sltu(struct psx *psx, u32 instr)
+void
+dasm_sltu(struct psx *psx, u32 instr)
 {
     if (GET_RD(instr) == GET_RS(instr)) {
         dasm_print(psx, instr, "sltu", d_RD, d_RT, STOP);
@@ -711,7 +864,8 @@ void dasm_sltu(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_slt(struct psx *psx, u32 instr)
+void
+dasm_slt(struct psx *psx, u32 instr)
 {
     if (GET_RD(instr) == GET_RS(instr)) {
         dasm_print(psx, instr, "slt", d_RD, d_RT, STOP);
@@ -720,7 +874,8 @@ void dasm_slt(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_slti(struct psx *psx, u32 instr)
+void
+dasm_slti(struct psx *psx, u32 instr)
 {
     if (GET_RT(instr) == GET_RS(instr)) {
         dasm_print(psx, instr, "slti", d_RT, d_IMM16, STOP);
@@ -729,7 +884,8 @@ void dasm_slti(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_sltiu(struct psx *psx, u32 instr)
+void
+dasm_sltiu(struct psx *psx, u32 instr)
 {
     if (GET_RT(instr) == GET_RS(instr)) {
         dasm_print(psx, instr, "sltiu", d_RT, d_UIMM16, STOP);
@@ -738,7 +894,8 @@ void dasm_sltiu(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_addu(struct psx *psx, u32 instr)
+void
+dasm_addu(struct psx *psx, u32 instr)
 {
     if (GET_RT(instr) == 0) {
         dasm_print(psx, instr, "move", d_RD, d_RS, STOP);
@@ -751,7 +908,8 @@ void dasm_addu(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_subu(struct psx *psx, u32 instr)
+void
+dasm_subu(struct psx *psx, u32 instr)
 {
     if (GET_RD(instr) == GET_RS(instr)) {
         dasm_print(psx, instr, "subu", d_RD, d_RT, STOP);
@@ -760,7 +918,8 @@ void dasm_subu(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_add(struct psx *psx, u32 instr)
+void
+dasm_add(struct psx *psx, u32 instr)
 {
     if (GET_RT(instr) == 0) {
         dasm_print(psx, instr, "move", d_RD, d_RS, STOP);
@@ -773,47 +932,56 @@ void dasm_add(struct psx *psx, u32 instr)
     }
 }
 
-void dasm_multu(struct psx *psx, u32 instr)
+void
+dasm_multu(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "multu", d_RS, d_RT, STOP);
 }
 
-void dasm_div(struct psx *psx, u32 instr)
+void
+dasm_div(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "div", d_RS, d_RT, STOP);
 }
 
-void dasm_divu(struct psx *psx, u32 instr)
+void
+dasm_divu(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "divu", d_RS, d_RT, STOP);
 }
 
-void dasm_mflo(struct psx *psx, u32 instr)
+void
+dasm_mflo(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "mflo", d_RD, d_LO, STOP);
 }
 
-void dasm_mtlo(struct psx *psx, u32 instr)
+void
+dasm_mtlo(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "mtlo", d_LO, d_RS, STOP);
 }
 
-void dasm_mfhi(struct psx *psx, u32 instr)
+void
+dasm_mfhi(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "mfhi", d_RD, d_HI, STOP);
 }
 
-void dasm_mthi(struct psx *psx, u32 instr)
+void
+dasm_mthi(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "mthi", d_HI, d_RS, STOP);
 }
 
-void dasm_syscall(struct psx *psx, u32 instr)
+void
+dasm_syscall(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "syscall", d_IMM20, STOP);
 }
 
-void dasm_rfe(struct psx *psx, u32 instr)
+void
+dasm_rfe(struct psx *psx, u32 instr)
 {
     dasm_print(psx, instr, "rfe", STOP);
 }
@@ -821,88 +989,101 @@ void dasm_rfe(struct psx *psx, u32 instr)
 /* Convention: any instrunction (even load instructions)
  * that modifies a general purpose register (gpr) returns the register id that
  * it modifies, if it doesn't modify any gpr it returns 0. */
-u8 sll(struct psx *psx, u32 instr)
+u8
+sll(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] = psx->regs[GET_RT(instr)] << GET_SHAMT(instr);
     return GET_RD(instr);
 }
 
-u8 sllv(struct psx *psx, u32 instr)
+u8
+sllv(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] = psx->regs[GET_RT(instr)]
                                << (psx->regs[GET_RS(instr)] & 0x1F);
     return GET_RD(instr);
 }
 
-u8 srlv(struct psx *psx, u32 instr)
+u8
+srlv(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] =
         psx->regs[GET_RT(instr)] >> (psx->regs[GET_RS(instr)] & 0x1F);
     return GET_RD(instr);
 }
 
-u8 srav(struct psx *psx, u32 instr)
+u8
+srav(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] =
         ((i32)psx->regs[GET_RT(instr)]) >> (psx->regs[GET_RS(instr)] & 0x1F);
     return GET_RD(instr);
 }
 
-u8 sra(struct psx *psx, u32 instr)
+u8
+sra(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] =
         ((i32)psx->regs[GET_RT(instr)]) >> GET_SHAMT(instr);
     return GET_RD(instr);
 }
 
-u8 srl(struct psx *psx, u32 instr)
+u8
+srl(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] = psx->regs[GET_RT(instr)] >> GET_SHAMT(instr);
     return GET_RD(instr);
 }
 
-u8 sltu(struct psx *psx, u32 instr)
+u8
+sltu(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] =
         (psx->regs[GET_RS(instr)] < psx->regs[GET_RT(instr)]);
     return GET_RD(instr);
 }
 
-u8 slt(struct psx *psx, u32 instr)
+u8
+slt(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] =
         (((i32)psx->regs[GET_RS(instr)]) < ((i32)psx->regs[GET_RT(instr)]));
     return GET_RD(instr);
 }
 
-u8 slti(struct psx *psx, u32 instr)
+u8
+slti(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RT(instr)] =
         (((i32)(psx->regs[GET_RS(instr)])) < ((i32)GET_IMM16(instr)));
     return GET_RT(instr);
 }
 
-u8 sltiu(struct psx *psx, u32 instr)
+u8
+sltiu(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RT(instr)] =
         psx->regs[GET_RS(instr)] < ((u32)((i32)GET_IMM16(instr)));
     return GET_RT(instr);
 }
 
-u8 lui(struct psx *psx, u32 instr)
+u8
+lui(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RT(instr)] = instr << 16;
     return GET_RT(instr);
 }
 
-u8 jr(struct psx *psx, u32 instr)
+u8
+jr(struct psx *psx, u32 instr)
 {
     assert(psx->regs[GET_RS(instr)] % 4 == 0 && "unaligned address");
     psx->next_pc = psx->regs[GET_RS(instr)];
     return 0;
 }
 
-u8 jalr(struct psx *psx, u32 instr)
+u8
+jalr(struct psx *psx, u32 instr)
 {
     assert(psx->regs[GET_RS(instr)] % 4 == 0 && "unaligned address");
     psx->next_pc = psx->regs[GET_RS(instr)];
@@ -910,20 +1091,23 @@ u8 jalr(struct psx *psx, u32 instr)
     return GET_RD(instr);
 }
 
-u8 j(struct psx *psx, u32 instr)
+u8
+j(struct psx *psx, u32 instr)
 {
     psx->next_pc = GET_TARGET(psx->pc, instr);
     return 0;
 }
 
-u8 jal(struct psx *psx, u32 instr)
+u8
+jal(struct psx *psx, u32 instr)
 {
     psx->next_pc = GET_TARGET(psx->pc, instr);
     psx->ra = psx->addr_to_instr + 8;
     return 31;
 }
 
-u8 beq(struct psx *psx, u32 instr)
+u8
+beq(struct psx *psx, u32 instr)
 {
     if (psx->regs[GET_RS(instr)] == psx->regs[(GET_RT(instr))]) {
         psx->next_pc = GET_BRANCH(psx->addr_to_instr, instr);
@@ -931,7 +1115,8 @@ u8 beq(struct psx *psx, u32 instr)
     return 0;
 }
 
-u8 bne(struct psx *psx, u32 instr)
+u8
+bne(struct psx *psx, u32 instr)
 {
     if (psx->regs[GET_RS(instr)] != psx->regs[(GET_RT(instr))]) {
         psx->next_pc = GET_BRANCH(psx->addr_to_instr, instr);
@@ -939,7 +1124,8 @@ u8 bne(struct psx *psx, u32 instr)
     return 0;
 }
 
-u8 bgtz(struct psx *psx, u32 instr)
+u8
+bgtz(struct psx *psx, u32 instr)
 {
     if (((i32)(psx->regs[GET_RS(instr)])) > 0) {
         psx->next_pc = GET_BRANCH(psx->addr_to_instr, instr);
@@ -947,7 +1133,8 @@ u8 bgtz(struct psx *psx, u32 instr)
     return 0;
 }
 
-u8 blez(struct psx *psx, u32 instr)
+u8
+blez(struct psx *psx, u32 instr)
 {
     if (((i32)(psx->regs[GET_RS(instr)])) <= 0) {
         psx->next_pc = GET_BRANCH(psx->addr_to_instr, instr);
@@ -955,7 +1142,8 @@ u8 blez(struct psx *psx, u32 instr)
     return 0;
 }
 
-u8 bltz(struct psx *psx, u32 instr)
+u8
+bltz(struct psx *psx, u32 instr)
 {
     if (((i32)(psx->regs[GET_RS(instr)])) < 0) {
         psx->next_pc = GET_BRANCH(psx->addr_to_instr, instr);
@@ -963,7 +1151,8 @@ u8 bltz(struct psx *psx, u32 instr)
     return 0;
 }
 
-u8 bgez(struct psx *psx, u32 instr)
+u8
+bgez(struct psx *psx, u32 instr)
 {
     if (((i32)(psx->regs[GET_RS(instr)])) >= 0) {
         psx->next_pc = GET_BRANCH(psx->addr_to_instr, instr);
@@ -971,7 +1160,8 @@ u8 bgez(struct psx *psx, u32 instr)
     return 0;
 }
 
-u8 mips_multu(struct psx *psx, u32 instr)
+u8
+mips_multu(struct psx *psx, u32 instr)
 {
     u64 hilo = (u64)psx->regs[GET_RS(instr)] * psx->regs[GET_RT(instr)];
 
@@ -980,7 +1170,8 @@ u8 mips_multu(struct psx *psx, u32 instr)
     return 0;
 }
 
-u8 mips_div(struct psx *psx, u32 instr)
+u8
+mips_div(struct psx *psx, u32 instr)
 {
     if (psx->regs[GET_RT(instr)] == 0) {
         psx->lo = psx->regs[GET_RS(instr)] >= 0 ? -1 : 1;
@@ -998,7 +1189,8 @@ u8 mips_div(struct psx *psx, u32 instr)
     return 0;
 }
 
-u8 mips_divu(struct psx *psx, u32 instr)
+u8
+mips_divu(struct psx *psx, u32 instr)
 {
     if (psx->regs[GET_RT(instr)] == 0) {
         psx->lo = 0xffffffff;
@@ -1010,37 +1202,43 @@ u8 mips_divu(struct psx *psx, u32 instr)
     return 0;
 }
 
-u8 mflo(struct psx *psx, u32 instr)
+u8
+mflo(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] = psx->lo;
     return GET_RD(instr);
 }
 
-u8 mtlo(struct psx *psx, u32 instr)
+u8
+mtlo(struct psx *psx, u32 instr)
 {
     psx->lo = psx->regs[GET_RS(instr)];
     return 0;
 }
 
-u8 mfhi(struct psx *psx, u32 instr)
+u8
+mfhi(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] = psx->hi;
     return GET_RD(instr);
 }
 
-u8 mthi(struct psx *psx, u32 instr)
+u8
+mthi(struct psx *psx, u32 instr)
 {
     psx->hi = psx->regs[GET_RS(instr)];
     return 0;
 }
 
-u8 addiu(struct psx *psx, u32 instr)
+u8
+addiu(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RT(instr)] = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
     return GET_RT(instr);
 }
 
-u8 addi(struct psx *psx, u32 instr)
+u8
+addi(struct psx *psx, u32 instr)
 {
     i32 val = psx->regs[GET_RS(instr)];
     i16 imm = GET_IMM16(instr);
@@ -1054,7 +1252,8 @@ u8 addi(struct psx *psx, u32 instr)
     return GET_RT(instr);
 }
 
-u8 add(struct psx *psx, u32 instr)
+u8
+add(struct psx *psx, u32 instr)
 {
     i32 a = psx->regs[GET_RS(instr)];
     i32 b = psx->regs[GET_RT(instr)];
@@ -1068,38 +1267,45 @@ u8 add(struct psx *psx, u32 instr)
     return GET_RD(instr);
 }
 
-u8 addu(struct psx *psx, u32 instr)
+u8
+addu(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] =
         psx->regs[GET_RS(instr)] + psx->regs[GET_RT(instr)];
     return GET_RD(instr);
 }
 
-u8 subu(struct psx *psx, u32 instr)
+u8
+subu(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] =
         psx->regs[GET_RS(instr)] - psx->regs[GET_RT(instr)];
     return GET_RD(instr);
 }
 
-u8 ori(struct psx *psx, u32 instr)
+u8
+ori(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RT(instr)] = psx->regs[GET_RS(instr)] | GET_UIMM16(instr);
     return GET_RT(instr);
 }
 
-u8 andi(struct psx *psx, u32 instr)
+u8
+andi(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RT(instr)] = psx->regs[GET_RS(instr)] & GET_UIMM16(instr);
     return GET_RT(instr);
 }
 
-u8 sb(struct psx *psx, u32 instr)
+u8
+sb(struct psx *psx, u32 instr)
 {
     u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
     u8 value = psx->regs[GET_RT(instr)] & 0xFF;
 
     assert(!IS_DCHR(addr));
+    Assert(addr != I_STAT, sb);
+    Assert(addr != I_MASK, sb);
 
     /* 0x1f802041 is the Post Status byte in the BIOS.
      * An ID byte to say how far along the boot has progressed. */
@@ -1112,34 +1318,136 @@ u8 sb(struct psx *psx, u32 instr)
     return 0;
 }
 
-u8 sh(struct psx *psx, u32 instr)
+u8
+sh(struct psx *psx, u32 instr)
 {
     u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
+    u16 val = psx->regs[GET_RT(instr)] & 0xFFFF;
+
     /* has to be 2 bytes aligned */
     assert(addr % sizeof(u16) == 0 && !IS_DCHR(addr));
-
-    u16 value = psx->regs[GET_RT(instr)] & 0xFFFF;
+    Assert(addr != I_STAT, sh);
+    if (addr == I_MASK) {
+        psx->i_mask = val;
+        return 0;
+    }
 
     u16 *half_word = GET_HALFWORD_PTR(psx->addr[addr]);
-    half_word[0] = value;
+    half_word[0] = val;
     return 0;
 }
 
-u8 sw(struct psx *psx, u32 instr)
+u8
+sw(struct psx *psx, u32 instr)
 {
     u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
+    u32 val = psx->regs[GET_RT(instr)];
 
-    assert(addr != GP1);
-    assert(addr != GP0);
-    assert(addr % 4 == 0);
-    assert(!IS_DCHR(addr));
+    if (addr == I_STAT) {
+        psx->i_stat &= val;
+        return 0;
+    }
+    if (addr == I_MASK) {
+        psx->i_mask = val;
+        return 0;
+    }
+    Assert(addr != DICR || val == 0, sw);
+
+    if (addr == DICR) {
+        psx->dicr |= val & GENMASK(23, 0);
+        psx->dicr &= ~(val & GENMASK(30, 24));
+        if ((psx->dicr & (1 << 15)) ||
+            ((psx->dicr & (1 << 23)) && (psx->dicr & GENMASK(30, 24)) > 0)) {
+
+            if ((psx->dicr & (1 << 31)) == 0) {
+                psx->dicr |= 1 << 31;
+                psx->i_stat |= 1 << 3; /* DMA IRQ set */
+                // Things I need to worry about, learn about how interrupt
+                // handling works, learn how DICR bits 24-30 need to change
+                // after dma6 or dma2 channel.
+            }
+
+        } else {
+            psx->dicr &= ~(1 << 31);
+        }
+        return 0;
+    }
+
+    /* no need to emulate fifo cmd buffer just always say it's empty. */
+    if (addr == GP0 && (val & GP_CMD) == DRAW_MODE_SETTINGS) {
+        psx->gpustat &= ~(TBY2 | 0x7ff);
+        psx->gpustat |= (val & 0x7ff) | ((val & (1 << 11)) << 4);
+        return 0;
+    }
+
+    /* NOP */
+    if (addr == GP0 && (val & GP_CMD) == 0) {
+        return 0;
+    }
+
+    if (addr == D2_CHCR && (val & START_TRANSFER) == 0) {
+        psx->dma_chcr[2] = val;
+        return 0;
+    }
+
+    if (addr == GP1 && (val & GP_CMD) == 0) {
+        psx->gpustat = GP1_RESET;
+        return 0;
+    }
+
+    if (addr == GP1 && (val & GP_CMD) == (0x08 << 24)) {
+        psx->gpustat = (psx->gpustat & ~(GENMASK(22, 16) | (1 << 14))) |
+                       ((val & GENMASK(5, 0)) << 17) |
+                       ((val & (1 << 6)) << 10) | ((val & (1 << 7)) << 7);
+        return 0;
+    }
+
+    if (addr == D6_CHCR && val == 0) {
+        psx->dma_chcr[6] = val;
+        return 0;
+    }
+
+    if (addr == D6_MADR) {
+        psx->dma_madr[6] = val & GENMASK(23, 0);
+        u32 *word = GET_WORD_PTR(psx->addr[addr]);
+        word[0] = psx->dma_madr[6];
+        return 0;
+    }
+
+    if (addr == D6_BCR) {
+        psx->dma_bcr[6] = val;
+        return 0;
+    }
+
+    Assert(addr != D6_CHCR, sw);
+    if (addr == D6_CHCR && val == 0x11000002) {
+        psx->dma_chcr[6] = val & ~FORCE_TRANSFER_START;
+        /* TODO: DMA Control Register should be considered.  */
+        /* Ordering table clear */
+        const u32 madr = psx->dma_madr[6];
+        const u32 n = psx->dma_bcr[6];
+        for (int i = 0; i < n - 1; ++i) {
+            u32 *word = GET_WORD_PTR(psx->addr[madr - (4 * i)]);
+            *word = (madr - 4 * (i + 1)) & 0xffffff;
+        }
+        u32 *word = GET_WORD_PTR(psx->addr[madr - (4 * (n - 1))]);
+        *word = 0xffffff;
+        return 0;
+    }
+
+    Assert(addr != GP1, sw);
+    Assert(addr != GP0, sw);
+    Assert(addr % 4 == 0, sw);
+    Assert(!IS_DCHR(addr), sw);
+    Assert(!IS_DMADR(addr), sw);
 
     u32 *word = GET_WORD_PTR(psx->addr[addr]);
-    word[0] = psx->regs[GET_RT(instr)];
+    word[0] = val;
     return 0;
 }
 
-u8 lbu(struct psx *psx, u32 instr)
+u8
+lbu(struct psx *psx, u32 instr)
 {
     u32 addr = (i32)GET_IMM16(instr) + psx->regs[GET_RS(instr)];
     u32 byte = psx->addr[addr];
@@ -1147,7 +1455,8 @@ u8 lbu(struct psx *psx, u32 instr)
     return GET_RT(instr);
 }
 
-u8 lhu(struct psx *psx, u32 instr)
+u8
+lhu(struct psx *psx, u32 instr)
 {
     u32 addr = (i32)GET_IMM16(instr) + psx->regs[GET_RS(instr)];
     assert(addr % 2 == 0);
@@ -1158,31 +1467,35 @@ u8 lhu(struct psx *psx, u32 instr)
     return GET_RT(instr);
 }
 
-u8 and(struct psx *psx, u32 instr)
+u8
+and(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] =
         psx->regs[GET_RS(instr)] & psx->regs[GET_RT(instr)];
     return GET_RD(instr);
 }
 
-u8 or(struct psx *psx, u32 instr)
+u8
+or(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] =
         psx->regs[GET_RS(instr)] | psx->regs[GET_RT(instr)];
     return GET_RD(instr);
 }
 
-u8 nor(struct psx *psx, u32 instr)
+u8
+nor(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] =
         0xffffffff ^ (psx->regs[GET_RS(instr)] | psx->regs[GET_RT(instr)]);
     return GET_RD(instr);
 }
 
-u8 lb(struct psx *psx, u32 instr)
+u8
+lb(struct psx *psx, u32 instr)
 {
     u32 addr = ((i32)GET_IMM16(instr)) + psx->regs[GET_RS(instr)];
-    assert(!IS_DCHR(addr));
+    Assert(!IS_DCHR(addr), lb);
 
     /* i forgot why? */
     if (PADDR(addr) == 0x1f000084 && addr != 0xfffe0130) {
@@ -1196,10 +1509,11 @@ u8 lb(struct psx *psx, u32 instr)
     return GET_RT(instr);
 }
 
-u8 lh(struct psx *psx, u32 instr)
+u8
+lh(struct psx *psx, u32 instr)
 {
     u32 addr = (i32)GET_IMM16(instr) + psx->regs[GET_RS(instr)];
-    assert(addr % 2 == 0 && !IS_DCHR(addr));
+    Assert(addr % 2 == 0 && !IS_DCHR(addr), lh);
 
     u32 halfword = (i32)(i16)(*GET_HALFWORD_PTR(psx->addr[addr]));
 
@@ -1207,31 +1521,47 @@ u8 lh(struct psx *psx, u32 instr)
     return GET_RT(instr);
 }
 
-u8 lw(struct psx *psx, u32 instr)
+u8
+lw(struct psx *psx, u32 instr)
 {
     u32 addr = GET_IMM16(instr) + psx->regs[GET_RS(instr)];
 
-    assert(addr != GP1);
-    assert(addr != GP0);
-    assert(addr % 4 == 0);
-    assert(!IS_DCHR(addr));
+    Assert(addr != I_STAT, lw);
+    if (addr == I_MASK) {
+        lds_push(psx->load_delay_slots, GET_RT(instr), psx->i_mask);
+        return GET_RT(instr);
+    }
+
+    if (addr == GP1) {
+        lds_push(psx->load_delay_slots, GET_RT(instr), psx->gpustat);
+        return GET_RT(instr);
+    }
+
+    Assert(addr != GP0 || GET_RT(instr) == 0, lw);
+    Assert(addr % 4 == 0, lw);
+    Assert(!IS_DCHR(addr), lw);
+    Assert(!IS_DMADR(addr), lw);
 
     u32 word = *GET_WORD_PTR(psx->addr[addr]);
-
     lds_push(psx->load_delay_slots, GET_RT(instr), word);
     return GET_RT(instr);
 }
 
-u8 mfc0(struct psx *psx, u32 instr)
+u8
+mfc0(struct psx *psx, u32 instr)
 {
     lds_push(psx->load_delay_slots, GET_RT(instr), psx->cop0[GET_RD(instr)]);
     return GET_RT(instr);
 }
 
-u8 mtc0(struct psx *psx, u32 instr)
+u8
+mtc0(struct psx *psx, u32 instr)
 {
     assert(GET_RD(instr) < (sizeof(psx->cop0) / sizeof(psx->cop0[0])));
+    Assert(GET_RD(instr) != 13 || psx->regs[GET_RT(instr)] == 0, mtc0);
     psx->cop0[GET_RD(instr)] = psx->regs[GET_RT(instr)];
+
+    Assert((psx->sr & GENMASK(15, 8)) == 0, mtc0);
 
     if (SR_GET_ISC(psx->sr) == 1) {
         psx->addr = psx->isolated_cache;
@@ -1243,7 +1573,8 @@ u8 mtc0(struct psx *psx, u32 instr)
     return 0;
 }
 
-u8 mips_syscall(struct psx *psx, u32 instr)
+u8
+mips_syscall(struct psx *psx, u32 instr)
 {
     psx->sr = (psx->sr & ~0x3f) | ((psx->sr & 0xf) << 2);
 
@@ -1261,13 +1592,15 @@ u8 mips_syscall(struct psx *psx, u32 instr)
     return 0;
 }
 
-u8 rfe(struct psx *psx, u32 instr)
+u8
+rfe(struct psx *psx, u32 instr)
 {
     psx->sr = (psx->sr & ~0x3f) | ((psx->sr & 0x3f) >> 2);
     return 0;
 }
 
-void bios_functions(struct psx *psx)
+void
+bios_functions(struct psx *psx)
 {
     static u16 len;
     static char buf[4 * KB];
@@ -1294,7 +1627,8 @@ void bios_functions(struct psx *psx)
 /* convention: any instrunction that modifies a register returns the register id
  * that it modifies, if it doesn't modify any register it returns 0.
  * */
-void exec_loop(struct psx *psx)
+void
+exec_loop(struct psx *psx)
 {
     static void *dispatch_tbl[] = {
         &&h_special, &&h_bcondz, &&h_j,    &&h_jal,   &&h_beq,  &&h_bne,
@@ -1350,26 +1684,19 @@ void exec_loop(struct psx *psx)
     psx->pc = RESET_VECTOR;
     psx->next_pc = psx->pc + 4;
 
-#define PRE_OP()                                                               \
+#define PRE_OP(cmd)                                                            \
     do {                                                                       \
         assert(psx->r0 == 0);                                                  \
         psx->addr_to_instr = psx->pc;                                          \
         bios_functions(psx);                                                   \
         psx->pc = psx->next_pc;                                                \
         psx->next_pc = psx->pc + 4;                                            \
+        /* dasm_##cmd(psx, instr); */                                          \
     } while (0)
 
-#define BRANCH_POST_OP()                                                       \
+#define POST_OP(val)                                                           \
     do {                                                                       \
-        psx->is_branch_delay = true;                                           \
-        lds_sanity_clear(psx->load_delay_slots, psx->last_modified_reg);       \
-        struct load_delay_slot top = lds_pop(psx->load_delay_slots);           \
-        psx->regs[top.reg_index] = top.value;                                  \
-    } while (0)
-
-#define POST_OP()                                                              \
-    do {                                                                       \
-        psx->is_branch_delay = false;                                          \
+        psx->is_branch_delay = val;                                            \
         lds_sanity_clear(psx->load_delay_slots, psx->last_modified_reg);       \
         struct load_delay_slot top = lds_pop(psx->load_delay_slots);           \
         psx->regs[top.reg_index] = top.value;                                  \
@@ -1393,126 +1720,108 @@ h_special:
 h_bcondz:
     goto *bcondz_dispatch_tbl[GET_RT(instr)];
 h_bltz:
-    PRE_OP();
-    dasm_bltz(psx, instr);
+    PRE_OP(bltz);
     psx->last_modified_reg = bltz(psx, instr);
-    BRANCH_POST_OP();
+    POST_OP(true);
     DISPATCH();
 h_bgez:
-    PRE_OP();
-    dasm_bgez(psx, instr);
+    PRE_OP(bgez);
     psx->last_modified_reg = bgez(psx, instr);
-    BRANCH_POST_OP();
+    POST_OP(true);
     DISPATCH();
 h_bltzal:
     assert(false);
 h_bgezal:
     assert(false);
 h_j:
-    PRE_OP();
-    dasm_j(psx, instr);
+    PRE_OP(j);
     psx->last_modified_reg = j(psx, instr);
-    BRANCH_POST_OP();
+    POST_OP(true);
     DISPATCH();
 h_jal:
-    PRE_OP();
-    dasm_jal(psx, instr);
+    PRE_OP(jal);
     psx->last_modified_reg = jal(psx, instr);
-    BRANCH_POST_OP();
+    POST_OP(true);
     DISPATCH();
 h_beq:
-    PRE_OP();
-    dasm_beq(psx, instr);
+    PRE_OP(beq);
     psx->last_modified_reg = beq(psx, instr);
-    BRANCH_POST_OP();
+    POST_OP(true);
     DISPATCH();
 h_bne:
-    PRE_OP();
-    dasm_bne(psx, instr);
+    PRE_OP(bne);
     psx->last_modified_reg = bne(psx, instr);
-    BRANCH_POST_OP();
+    POST_OP(true);
     DISPATCH();
 h_blez:
-    PRE_OP();
-    dasm_blez(psx, instr);
+    PRE_OP(blez);
     psx->last_modified_reg = blez(psx, instr);
-    BRANCH_POST_OP();
+    POST_OP(true);
     DISPATCH();
 h_bgtz:
-    PRE_OP();
-    dasm_bgtz(psx, instr);
+    PRE_OP(bgtz);
     psx->last_modified_reg = bgtz(psx, instr);
-    BRANCH_POST_OP();
+    POST_OP(true);
     DISPATCH();
 h_addi:
-    PRE_OP();
-    dasm_addi(psx, instr);
+    PRE_OP(addi);
     psx->last_modified_reg = addi(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_addiu:
-    PRE_OP();
-    dasm_addiu(psx, instr);
+    PRE_OP(addiu);
     psx->last_modified_reg = addiu(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_slti:
-    PRE_OP();
-    dasm_slti(psx, instr);
+    PRE_OP(slti);
     psx->last_modified_reg = slti(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_sltiu:
-    PRE_OP();
-    dasm_sltiu(psx, instr);
+    PRE_OP(sltiu);
     psx->last_modified_reg = sltiu(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_andi:
-    PRE_OP();
-    dasm_andi(psx, instr);
+    PRE_OP(andi);
     psx->last_modified_reg = andi(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_ori:
-    PRE_OP();
-    dasm_ori(psx, instr);
+    PRE_OP(ori);
     psx->last_modified_reg = ori(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_xori:
     assert(false);
 h_lui:
-    PRE_OP();
-    dasm_lui(psx, instr);
+    PRE_OP(lui);
     psx->last_modified_reg = lui(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_cop0:
     assert(GET_RS(instr) <
            sizeof(cop0_dispatch_tbl) / sizeof(cop0_dispatch_tbl[0]));
     goto *cop0_dispatch_tbl[GET_RS(instr)];
 h_mfc0:
-    PRE_OP();
-    dasm_mfc0(psx, instr);
+    PRE_OP(mfc0);
     psx->last_modified_reg = mfc0(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_cfc0:
     assert(false);
 h_mtc0:
-    PRE_OP();
-    dasm_mtc0(psx, instr);
+    PRE_OP(mtc0);
     psx->last_modified_reg = mtc0(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_ctc0:
     assert(false);
 h_rfe:
-    PRE_OP();
-    dasm_rfe(psx, instr);
+    PRE_OP(rfe);
     psx->last_modified_reg = rfe(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_cop1:
     assert(false);
@@ -1521,58 +1830,50 @@ h_cop2:
 h_cop3:
     assert(false);
 h_lb:
-    PRE_OP();
-    dasm_lb(psx, instr);
+    PRE_OP(lb);
     psx->last_modified_reg = lb(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_lh:
-    PRE_OP();
-    dasm_lh(psx, instr);
+    PRE_OP(lh);
     psx->last_modified_reg = lh(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_lwl:
     assert(false);
 h_lw:
-    PRE_OP();
-    dasm_lw(psx, instr);
+    PRE_OP(lw);
     psx->last_modified_reg = lw(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_lbu:
-    PRE_OP();
-    dasm_lbu(psx, instr);
+    PRE_OP(lbu);
     psx->last_modified_reg = lbu(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_lhu:
-    PRE_OP();
-    dasm_lhu(psx, instr);
+    PRE_OP(lhu);
     psx->last_modified_reg = lhu(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_lwr:
     assert(false);
 h_sb:
-    PRE_OP();
-    dasm_sb(psx, instr);
+    PRE_OP(sb);
     psx->last_modified_reg = sb(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_sh:
-    PRE_OP();
-    dasm_sh(psx, instr);
+    PRE_OP(sh);
     psx->last_modified_reg = sh(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_swl:
     assert(false);
 h_sw:
-    PRE_OP();
-    dasm_sw(psx, instr);
+    PRE_OP(sw);
     psx->last_modified_reg = sw(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_swr:
     assert(false);
@@ -1594,156 +1895,132 @@ h_swc3:
     assert(false);
 /* special */
 h_sll:
-    PRE_OP();
-    dasm_sll(psx, instr);
+    PRE_OP(sll);
     psx->last_modified_reg = sll(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_srl:
-    PRE_OP();
-    dasm_srl(psx, instr);
+    PRE_OP(srl);
     psx->last_modified_reg = srl(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_sra:
-    PRE_OP();
-    dasm_sra(psx, instr);
+    PRE_OP(sra);
     psx->last_modified_reg = sra(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_sllv:
-    PRE_OP();
-    dasm_sllv(psx, instr);
+    PRE_OP(sllv);
     psx->last_modified_reg = sllv(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_srlv:
-    PRE_OP();
-    dasm_srlv(psx, instr);
+    PRE_OP(srlv);
     psx->last_modified_reg = srlv(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_srav:
-    PRE_OP();
-    dasm_srav(psx, instr);
+    PRE_OP(srav);
     psx->last_modified_reg = srav(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_jr:
-    PRE_OP();
-    dasm_jr(psx, instr);
+    PRE_OP(jr);
     psx->last_modified_reg = jr(psx, instr);
-    BRANCH_POST_OP();
+    POST_OP(true);
     DISPATCH();
 h_jalr:
-    PRE_OP();
-    dasm_jalr(psx, instr);
+    PRE_OP(jalr);
     psx->last_modified_reg = jalr(psx, instr);
-    BRANCH_POST_OP();
+    POST_OP(true);
     DISPATCH();
 h_syscall:
-    PRE_OP();
-    dasm_syscall(psx, instr);
+    PRE_OP(syscall);
     psx->last_modified_reg = mips_syscall(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_break:
     assert(false);
 h_mfhi:
-    PRE_OP();
-    dasm_mfhi(psx, instr);
+    PRE_OP(mfhi);
     psx->last_modified_reg = mfhi(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_mthi:
-    PRE_OP();
-    dasm_mthi(psx, instr);
+    PRE_OP(mthi);
     psx->last_modified_reg = mthi(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_mflo:
-    PRE_OP();
-    dasm_mflo(psx, instr);
+    PRE_OP(mflo);
     psx->last_modified_reg = mflo(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_mtlo:
-    PRE_OP();
-    dasm_mtlo(psx, instr);
+    PRE_OP(mtlo);
     psx->last_modified_reg = mtlo(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_mult:
     assert(false);
 h_multu:
-    PRE_OP();
-    dasm_multu(psx, instr);
+    PRE_OP(multu);
     psx->last_modified_reg = mips_multu(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_div:
-    PRE_OP();
-    dasm_div(psx, instr);
+    PRE_OP(div);
     psx->last_modified_reg = mips_div(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_divu:
-    PRE_OP();
-    dasm_divu(psx, instr);
+    PRE_OP(divu);
     psx->last_modified_reg = mips_divu(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_add:
-    PRE_OP();
-    dasm_add(psx, instr);
+    PRE_OP(add);
     psx->last_modified_reg = add(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_addu:
-    PRE_OP();
-    dasm_addu(psx, instr);
+    PRE_OP(addu);
     psx->last_modified_reg = addu(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_sub:
     assert(false);
 h_subu:
-    PRE_OP();
-    dasm_subu(psx, instr);
+    PRE_OP(subu);
     psx->last_modified_reg = subu(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_and:
-    PRE_OP();
-    dasm_and(psx, instr);
+    PRE_OP(and);
     psx->last_modified_reg = and(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_or:
-    PRE_OP();
-    dasm_or(psx, instr);
+    PRE_OP(or);
     psx->last_modified_reg = or(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_xor:
     assert(false);
 h_nor:
-    PRE_OP();
-    dasm_nor(psx, instr);
+    PRE_OP(nor);
     psx->last_modified_reg = nor(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_slt:
-    PRE_OP();
-    dasm_slt(psx, instr);
+    PRE_OP(slt);
     psx->last_modified_reg = slt(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_sltu:
-    PRE_OP();
-    dasm_sltu(psx, instr);
+    PRE_OP(sltu);
     psx->last_modified_reg = sltu(psx, instr);
-    POST_OP();
+    POST_OP(false);
     DISPATCH();
 h_na:
     assert(false);
@@ -1751,9 +2028,9 @@ h_na:
 #undef DISPATCH
 }
 
-void make_kseg(vm_address_t base_kseg, mem_entry_name_port_t shared_ram,
-               int bios_fd, mem_entry_name_port_t shared_er1,
-               mem_entry_name_port_t shared_io)
+void
+make_kseg(vm_address_t base_kseg, mem_entry_name_port_t shared_ram, int bios_fd,
+          mem_entry_name_port_t shared_er1, mem_entry_name_port_t shared_io)
 {
     kern_return_t ret = KERN_SUCCESS;
 
@@ -1789,7 +2066,8 @@ void make_kseg(vm_address_t base_kseg, mem_entry_name_port_t shared_ram,
     CHECK_ERR(bios == MAP_FAILED, "error allocating bios space: %d\n", errno);
 }
 
-void *make_psx_addr_space()
+void *
+make_psx_addr_space()
 {
     /* mirrored memory objects */
     memory_object_size_t size = RAM_SIZE;
@@ -1845,8 +2123,10 @@ void *make_psx_addr_space()
     return (void *)addr;
 }
 
-int main()
+int
+main()
 {
+    printf("cop0r13.bit10 is NOT a latch, ie. it gets automatically cleared as soon as (I_STAT AND I_MASK)=zero\n");
     struct psx psx;
     memset(&psx, 0, sizeof(psx));
     psx.addr = make_psx_addr_space();
@@ -1860,9 +2140,11 @@ int main()
                VM_INHERIT_DEFAULT);
     CHECK_ERR(ret != KERN_SUCCESS, "error allocating addr space: %d\n", ret);
     psx.isolated_cache = (u8 *)isolated_cache;
-    psx.sr = 0x10900000; /* no clue why I need to do this. */
+    psx.sr = 0x10900000;
 
-    psx.gpustat = (1 << 13);
+    /* This is the same value of gpustatus when reset gpu command (GP1(00h)) is
+     * ran. */
+    psx.gpustat = GP1_RESET;
 
     exec_loop(&psx);
     vm_deallocate(mach_task_self(), (vm_address_t)psx.addr, ADDR_SPACE_SIZE);
