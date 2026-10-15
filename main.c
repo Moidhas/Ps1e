@@ -79,7 +79,8 @@ typedef int8_t i8;
 #define RESET_VECTOR (KSEG1_START + BASE_BIOS_ADDR)
 #define UTLB_MISS_VECTOR 0x80000000
 #define COP0_BREAK_VECTOR 0x80000040
-#define GENERAL_VECTOR 0x80000080
+#define RAM_GENERAL_EXCEPTION_VECTOR 0x80000080
+#define ROM_GENERAL_EXCEPTION_VECTOR 0xbfc00180
 #define BASE_IO_PORTS_ADDR 0x1F801000
 
 #define GP1_RESET (0x14802000)
@@ -344,9 +345,14 @@ struct psx {
             u32 bada;   /* Bad Address (R) */
             u32 bdam;   /* Breakpoint Data Address Mask	(R/W) */
             u32 _na1;
-            u32 bpcm;  /* Breakpoint Program Counter Mask	(R/W) */
-            u32 sr;    /* System status register (R/W) */
-            u32 cause; /* Cause of the last exception (R, except bits 8-9 are R/W) */
+            u32 bpcm; /* Breakpoint Program Counter Mask	(R/W) */
+#define IEc (1 << 0)
+#define HIm (1 << 10) /* Hardware Interrupt mask) */
+            u32 sr;   /* System status register (R/W) */
+#define IP (1 << 10)
+#define Sw GENMASK(9, 8)
+            u32 cause; /* Cause of the last exception (R, except bits 8-9 are
+                          R/W) */
             u32 epc;   /* Exception Program Counter (R) */
             u32 prid;  /* Processor Revision Identifier (R) */
         };
@@ -375,12 +381,6 @@ struct psx {
      * memory) when ISC = 1. */
     u8 *isolated_cache;
 };
-
-static inline u32
-gen_cause(enum exc_code code, u8 branch_taken, u8 branch_delay)
-{
-    return (branch_delay << 31) | (branch_taken << 30) | (code << 2);
-}
 
 /* I treat zero as empty technically this could fail if you load zero into this
  * but for now idc. */
@@ -986,6 +986,35 @@ dasm_rfe(struct psx *psx, u32 instr)
     dasm_print(psx, instr, "rfe", STOP);
 }
 
+void
+exception(struct psx *psx, enum exc_code code)
+{
+    /* disable interrupts and switch to kernel mode. */
+    psx->sr = (psx->sr & ~0x3f) | ((psx->sr & 0xf) << 2);
+
+    psx->cause &= ~GENMASK(31, 30);
+    psx->cause |= psx->is_branch_delay ? 1 << 31 : 0;
+    psx->cause |= psx->pc != (psx->addr_to_instr + 4) ? 1 << 30 : 0;
+
+    psx->cause &= ~GENMASK(6, 2);
+    psx->cause |= code << 2;
+
+    if (psx->is_branch_delay) {
+        psx->epc = psx->addr_to_instr - 4;
+        psx->target = psx->pc;
+    } else {
+        psx->epc = psx->addr_to_instr;
+    }
+
+    if (psx->sr & (1 << 22)) {
+        psx->pc = ROM_GENERAL_EXCEPTION_VECTOR;
+    } else {
+        psx->pc = RAM_GENERAL_EXCEPTION_VECTOR;
+    }
+
+    psx->next_pc = psx->pc + 4;
+}
+
 /* Convention: any instrunction (even load instructions)
  * that modifies a general purpose register (gpr) returns the register id that
  * it modifies, if it doesn't modify any gpr it returns 0. */
@@ -1337,6 +1366,40 @@ sh(struct psx *psx, u32 instr)
     return 0;
 }
 
+void
+interrupt_check(struct psx *psx)
+{
+    if (psx->i_stat & psx->i_mask) {
+        psx->cause |= 1 << 10;
+    } else {
+        /* cop0r13.bit10 is NOT a latch, ie. it gets automatically cleared as
+         * soon as "(I_STAT AND I_MASK)=zero", so there's no need to do an
+         * acknowledge at the cop0 side. */
+        psx->cause &= ~(1 << 10);
+    }
+
+    if (psx->sr & IEc &&
+        ((psx->sr & psx->cause & IP) || (psx->cause & psx->sr & Sw))) {
+        exception(psx, e_INT);
+    }
+}
+
+void
+dma_update_master_interrupt_flag(struct psx *psx)
+{
+    if ((psx->dicr & (1 << 15)) ||
+        ((psx->dicr & (1 << 23)) && (psx->dicr & GENMASK(30, 24)) > 0)) {
+
+        if ((psx->dicr & (1 << 31)) == 0) {
+            psx->dicr |= 1 << 31;
+            psx->i_stat |= 1 << 3; /* DMA IRQ set */
+        }
+
+    } else {
+        psx->dicr &= ~(1 << 31);
+    }
+}
+
 u8
 sw(struct psx *psx, u32 instr)
 {
@@ -1351,25 +1414,13 @@ sw(struct psx *psx, u32 instr)
         psx->i_mask = val;
         return 0;
     }
-    Assert(addr != DICR || val == 0, sw);
+
+    // Assert(addr != DICR || val == 0, sw);
 
     if (addr == DICR) {
         psx->dicr |= val & GENMASK(23, 0);
         psx->dicr &= ~(val & GENMASK(30, 24));
-        if ((psx->dicr & (1 << 15)) ||
-            ((psx->dicr & (1 << 23)) && (psx->dicr & GENMASK(30, 24)) > 0)) {
-
-            if ((psx->dicr & (1 << 31)) == 0) {
-                psx->dicr |= 1 << 31;
-                psx->i_stat |= 1 << 3; /* DMA IRQ set */
-                // Things I need to worry about, learn about how interrupt
-                // handling works, learn how DICR bits 24-30 need to change
-                // after dma6 or dma2 channel.
-            }
-
-        } else {
-            psx->dicr &= ~(1 << 31);
-        }
+        dma_update_master_interrupt_flag(psx);
         return 0;
     }
 
@@ -1385,10 +1436,10 @@ sw(struct psx *psx, u32 instr)
         return 0;
     }
 
-    if (addr == D2_CHCR && (val & START_TRANSFER) == 0) {
-        psx->dma_chcr[2] = val;
-        return 0;
-    }
+    // if (addr == D2_CHCR && (val & START_TRANSFER) == 0) {
+    //     psx->dma_chcr[2] = val;
+    //     return 0;
+    // }
 
     if (addr == GP1 && (val & GP_CMD) == 0) {
         psx->gpustat = GP1_RESET;
@@ -1421,8 +1472,12 @@ sw(struct psx *psx, u32 instr)
 
     Assert(addr != D6_CHCR, sw);
     if (addr == D6_CHCR && val == 0x11000002) {
-        psx->dma_chcr[6] = val & ~FORCE_TRANSFER_START;
-        /* TODO: DMA Control Register should be considered.  */
+        /* START_TRANSFER and FORCE_TRANSFER_START bits are auto clear on
+         * start/end of transfer. Also D6_CHCR has only three read/write-able
+         * bits: 24,28,30. */
+        psx->dma_chcr[6] &=
+            ~FORCE_TRANSFER_START & ~START_TRANSFER & ~BUS_SNOOPING;
+        psx->dma_chcr[6] |= val & BUS_SNOOPING;
         /* Ordering table clear */
         const u32 madr = psx->dma_madr[6];
         const u32 n = psx->dma_bcr[6];
@@ -1432,6 +1487,12 @@ sw(struct psx *psx, u32 instr)
         }
         u32 *word = GET_WORD_PTR(psx->addr[madr - (4 * (n - 1))]);
         *word = 0xffffff;
+
+        if ((psx->dicr & (1 << 22)) && (psx->dicr & (1 << 23))) {
+            psx->dicr |= (1 << 30);
+            dma_update_master_interrupt_flag(psx);
+        }
+
         return 0;
     }
 
@@ -1561,7 +1622,7 @@ mtc0(struct psx *psx, u32 instr)
     Assert(GET_RD(instr) != 13 || psx->regs[GET_RT(instr)] == 0, mtc0);
     psx->cop0[GET_RD(instr)] = psx->regs[GET_RT(instr)];
 
-    Assert((psx->sr & GENMASK(15, 8)) == 0, mtc0);
+    Assert((psx->sr & IEc) == 0, mtc0);
 
     if (SR_GET_ISC(psx->sr) == 1) {
         psx->addr = psx->isolated_cache;
@@ -1574,21 +1635,9 @@ mtc0(struct psx *psx, u32 instr)
 }
 
 u8
-mips_syscall(struct psx *psx, u32 instr)
+mips_syscall(struct psx *psx)
 {
-    psx->sr = (psx->sr & ~0x3f) | ((psx->sr & 0xf) << 2);
-
-    if (psx->is_branch_delay) {
-        psx->target = psx->pc;
-        psx->epc = psx->addr_to_instr - 4;
-    } else {
-        psx->epc = psx->addr_to_instr;
-    }
-
-    psx->cause = gen_cause(e_Sys, psx->pc != (psx->addr_to_instr + 4),
-                           psx->is_branch_delay);
-    psx->pc = GENERAL_VECTOR;
-    psx->next_pc = GENERAL_VECTOR + 4;
+    exception(psx, e_Sys);
     return 0;
 }
 
@@ -1691,7 +1740,7 @@ exec_loop(struct psx *psx)
         bios_functions(psx);                                                   \
         psx->pc = psx->next_pc;                                                \
         psx->next_pc = psx->pc + 4;                                            \
-        /* dasm_##cmd(psx, instr); */                                          \
+        dasm_##cmd(psx, instr);                                                \
     } while (0)
 
 #define POST_OP(val)                                                           \
@@ -1700,6 +1749,7 @@ exec_loop(struct psx *psx)
         lds_sanity_clear(psx->load_delay_slots, psx->last_modified_reg);       \
         struct load_delay_slot top = lds_pop(psx->load_delay_slots);           \
         psx->regs[top.reg_index] = top.value;                                  \
+        interrupt_check(psx);                                                  \
     } while (0)
 
 #define DISPATCH()                                                             \
@@ -1936,7 +1986,7 @@ h_jalr:
     DISPATCH();
 h_syscall:
     PRE_OP(syscall);
-    psx->last_modified_reg = mips_syscall(psx, instr);
+    psx->last_modified_reg = mips_syscall(psx);
     POST_OP(false);
     DISPATCH();
 h_break:
@@ -2126,7 +2176,6 @@ make_psx_addr_space()
 int
 main()
 {
-    printf("cop0r13.bit10 is NOT a latch, ie. it gets automatically cleared as soon as (I_STAT AND I_MASK)=zero\n");
     struct psx psx;
     memset(&psx, 0, sizeof(psx));
     psx.addr = make_psx_addr_space();
