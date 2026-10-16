@@ -88,15 +88,42 @@ typedef int8_t i8;
 #define GP_CMD (0xff000000)
 #define DRAW_MODE_SETTINGS (0xe1 << 24)
 #define GP1 (0x1f801814)
-#define D0_CHCR (0x1F801088)
-#define D2_CHCR (D0_CHCR + 2 * 0x10)
-#define D6_CHCR (D0_CHCR + 6 * 0x10)
 
-#define D0_MADR (0x1f801080)
-#define D6_MADR (D0_MADR + 6 * 0x10)
+/* DMA addresses */
+#define DMA0(x) 0x1f80108##x /* MDECin (RAM to MDEC) */
+#define DMA1(x) 0x1f80109##x /* MDECout (MDEC to RAM) */
+#define DMA2(x) 0x1f8010a##x /* GPU (lists + image data) */
+#define DMA3(x) 0x1f8010b##x /* CDROM   (CDROM to RAM) */
+#define DMA4(x) 0x1f8010c##x /* SPU */
+#define DMA5(x) 0x1f8010d##x /* PIO (Expansion Port) */
+#define DMA6(x) 0x1f8010e##x /* OTC (reverse clear OT) (GPU related) */
 
-#define D6_BCR (0x1f8010e4)
-#define DICR (0x1f8010f4)
+#define D0_MADR DMA0(0)
+#define D1_MADR DMA1(0)
+#define D2_MADR DMA2(0)
+#define D3_MADR DMA3(0)
+#define D4_MADR DMA4(0)
+#define D5_MADR DMA5(0)
+#define D6_MADR DMA6(0)
+
+#define D0_BCR DMA0(4)
+#define D1_BCR DMA1(4)
+#define D2_BCR DMA2(4)
+#define D3_BCR DMA3(4)
+#define D4_BCR DMA4(4)
+#define D5_BCR DMA5(4)
+#define D6_BCR DMA6(4)
+
+#define D0_CHCR DMA0(8)
+#define D1_CHCR DMA1(8)
+#define D2_CHCR DMA2(8)
+#define D3_CHCR DMA3(8)
+#define D4_CHCR DMA4(8)
+#define D5_CHCR DMA5(8)
+#define D6_CHCR DMA6(8)
+
+#define DPCR 0x1f8010f0
+#define DICR 0x1f8010f4
 
 /* DMA Channel Control flags
  * for documentation: https://psx-spx.consoledev.net/ps1/system/dmachannels/ */
@@ -269,9 +296,6 @@ struct psx {
         };
     };
 
-    /* gpustat bitfield
-     * For documentation:
-     * https://psx-spx.consoledev.net/ps1/gpu/status-register/ */
 #define TBX GENMASK(3, 0)
 #define TBY (1 << 4)
 #define ABR GENMASK(6, 5)
@@ -297,15 +321,18 @@ struct psx {
 #define WFEP (1 << 28)
 #define DMD GENMASK(30, 29)
 #define ODE (1 << 31)
-
     u32 gpustat;
 
     u32 dma_chcr[7];
+
     /* dma_madr[i], The memory address the DMA will start reading from/writing
      * to, for channel i.*/
     u32 dma_madr[7];
 
     u32 dma_bcr[7];
+
+#define OTC_MASTER (1 << 27)
+    u32 dpcr;
 
     u32 dicr;
 
@@ -1406,6 +1433,41 @@ sw(struct psx *psx, u32 instr)
     u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
     u32 val = psx->regs[GET_RT(instr)];
 
+    Assert(addr != GP1 || (val & GP_CMD) == 0 || (val & GP_CMD) == (0x08 << 24),
+           sw);
+    Assert(addr != GP0 || (val & GP_CMD) == DRAW_MODE_SETTINGS ||
+               (val & GP_CMD) == 0,
+           sw);
+    Assert(addr % 4 == 0, sw);
+
+    Assert(addr != D0_BCR, sw);
+    Assert(addr != D1_BCR, sw);
+    Assert(addr != D2_BCR, sw);
+    Assert(addr != D3_BCR, sw);
+    Assert(addr != D4_BCR, sw);
+    Assert(addr != D5_BCR, sw);
+
+    Assert(addr != D0_MADR, sw);
+    Assert(addr != D1_MADR, sw);
+    Assert(addr != D2_MADR, sw);
+    Assert(addr != D3_MADR, sw);
+    Assert(addr != D4_MADR, sw);
+    Assert(addr != D5_MADR, sw);
+
+    Assert(addr != D0_CHCR, sw);
+    Assert(addr != D1_CHCR, sw);
+    Assert(addr != D2_CHCR || (val & START_TRANSFER) == 0, sw);
+    Assert(addr != D3_CHCR, sw);
+    Assert(addr != D4_CHCR, sw);
+    Assert(addr != D5_CHCR, sw);
+
+    if (addr == DPCR) {
+        psx->dpcr = val;
+        /* TODO: figure out what to do when master is not enabled and channel is
+         * started. */
+        return 0;
+    }
+
     if (addr == I_STAT) {
         psx->i_stat &= val;
         return 0;
@@ -1414,8 +1476,6 @@ sw(struct psx *psx, u32 instr)
         psx->i_mask = val;
         return 0;
     }
-
-    // Assert(addr != DICR || val == 0, sw);
 
     if (addr == DICR) {
         psx->dicr |= val & GENMASK(23, 0);
@@ -1436,10 +1496,10 @@ sw(struct psx *psx, u32 instr)
         return 0;
     }
 
-    // if (addr == D2_CHCR && (val & START_TRANSFER) == 0) {
-    //     psx->dma_chcr[2] = val;
-    //     return 0;
-    // }
+    if (addr == D2_CHCR && (val & START_TRANSFER) == 0) {
+        psx->dma_chcr[2] = val;
+        return 0;
+    }
 
     if (addr == GP1 && (val & GP_CMD) == 0) {
         psx->gpustat = GP1_RESET;
@@ -1453,15 +1513,9 @@ sw(struct psx *psx, u32 instr)
         return 0;
     }
 
-    if (addr == D6_CHCR && val == 0) {
-        psx->dma_chcr[6] = val;
-        return 0;
-    }
-
     if (addr == D6_MADR) {
+        Assert((val & GENMASK(1, 0)) == 0, sw);
         psx->dma_madr[6] = val & GENMASK(23, 0);
-        u32 *word = GET_WORD_PTR(psx->addr[addr]);
-        word[0] = psx->dma_madr[6];
         return 0;
     }
 
@@ -1470,37 +1524,42 @@ sw(struct psx *psx, u32 instr)
         return 0;
     }
 
-    Assert(addr != D6_CHCR, sw);
-    if (addr == D6_CHCR && val == 0x11000002) {
-        /* START_TRANSFER and FORCE_TRANSFER_START bits are auto clear on
-         * start/end of transfer. Also D6_CHCR has only three read/write-able
-         * bits: 24,28,30. */
-        psx->dma_chcr[6] &=
-            ~FORCE_TRANSFER_START & ~START_TRANSFER & ~BUS_SNOOPING;
-        psx->dma_chcr[6] |= val & BUS_SNOOPING;
-        /* Ordering table clear */
-        const u32 madr = psx->dma_madr[6];
-        const u32 n = psx->dma_bcr[6];
-        for (int i = 0; i < n - 1; ++i) {
-            u32 *word = GET_WORD_PTR(psx->addr[madr - (4 * i)]);
-            *word = (madr - 4 * (i + 1)) & 0xffffff;
-        }
-        u32 *word = GET_WORD_PTR(psx->addr[madr - (4 * (n - 1))]);
-        *word = 0xffffff;
+    if (addr == D6_CHCR) {
+        /* D6_CHCR has only three read/write-able bits: 24,28,30. All other bits
+         * are read-only: bit 1 is always 1 (increment=-4), and the other bits
+         * are always 0. */
+        psx->dma_chcr[6] =
+            (val & FORCE_TRANSFER_START & START_TRANSFER & BUS_SNOOPING) |
+            (1 << 1);
 
-        if ((psx->dicr & (1 << 22)) && (psx->dicr & (1 << 23))) {
-            psx->dicr |= (1 << 30);
-            dma_update_master_interrupt_flag(psx);
-        }
+        /* Lazy: start transfer should be if bit 25 goes 0 -> 1 rather
+         * then just checking if it's 1. Right now don't care since immediately
+         * start and finish transfer. */
+        if (psx->dma_chcr[6] & START_TRANSFER) {
+            Assert((psx->dpcr & OTC_MASTER) != 0, sw);
+            /* FORCE_TRANSFER_START cleared on transfer start */
+            psx->dma_chcr[6] &= ~FORCE_TRANSFER_START;
 
+            /* Ordering table clear */
+            const u32 madr = psx->dma_madr[6];
+            const u32 n = psx->dma_bcr[6];
+            for (int i = 0; i < n - 1; ++i) {
+                u32 *word = GET_WORD_PTR(psx->addr[madr - (4 * i)]);
+                *word = (madr - 4 * (i + 1)) & 0xffffff;
+            }
+            u32 *word = GET_WORD_PTR(psx->addr[madr - (4 * (n - 1))]);
+            *word = 0xffffff;
+
+            /* START_TRANSFER cleared on transfer end */
+            psx->dma_chcr[6] &= ~START_TRANSFER;
+
+            if ((psx->dicr & (1 << 22)) && (psx->dicr & (1 << 23))) {
+                psx->dicr |= (1 << 30);
+                dma_update_master_interrupt_flag(psx);
+            }
+        }
         return 0;
     }
-
-    Assert(addr != GP1, sw);
-    Assert(addr != GP0, sw);
-    Assert(addr % 4 == 0, sw);
-    Assert(!IS_DCHR(addr), sw);
-    Assert(!IS_DMADR(addr), sw);
 
     u32 *word = GET_WORD_PTR(psx->addr[addr]);
     word[0] = val;
@@ -1588,6 +1647,16 @@ lw(struct psx *psx, u32 instr)
     u32 addr = GET_IMM16(instr) + psx->regs[GET_RS(instr)];
 
     Assert(addr != I_STAT, lw);
+    Assert(addr != GP0 || GET_RT(instr) == 0, lw);
+    Assert(addr % 4 == 0, lw);
+    Assert(!IS_DCHR(addr), lw);
+    Assert(!IS_DMADR(addr), lw);
+
+    if (addr == DPCR) {
+        lds_push(psx->load_delay_slots, GET_RT(instr), psx->dpcr);
+        return GET_RT(instr);
+    }
+
     if (addr == I_MASK) {
         lds_push(psx->load_delay_slots, GET_RT(instr), psx->i_mask);
         return GET_RT(instr);
@@ -1597,11 +1666,6 @@ lw(struct psx *psx, u32 instr)
         lds_push(psx->load_delay_slots, GET_RT(instr), psx->gpustat);
         return GET_RT(instr);
     }
-
-    Assert(addr != GP0 || GET_RT(instr) == 0, lw);
-    Assert(addr % 4 == 0, lw);
-    Assert(!IS_DCHR(addr), lw);
-    Assert(!IS_DMADR(addr), lw);
 
     u32 word = *GET_WORD_PTR(psx->addr[addr]);
     lds_push(psx->load_delay_slots, GET_RT(instr), word);
@@ -1740,7 +1804,7 @@ exec_loop(struct psx *psx)
         bios_functions(psx);                                                   \
         psx->pc = psx->next_pc;                                                \
         psx->next_pc = psx->pc + 4;                                            \
-        dasm_##cmd(psx, instr);                                                \
+        /* dasm_##cmd(psx, instr); */                                          \
     } while (0)
 
 #define POST_OP(val)                                                           \
