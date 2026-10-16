@@ -1649,8 +1649,34 @@ lw(struct psx *psx, u32 instr)
     Assert(addr != I_STAT, lw);
     Assert(addr != GP0 || GET_RT(instr) == 0, lw);
     Assert(addr % 4 == 0, lw);
-    Assert(!IS_DCHR(addr), lw);
-    Assert(!IS_DMADR(addr), lw);
+
+    Assert(addr != D0_BCR, lw);
+    Assert(addr != D1_BCR, lw);
+    Assert(addr != D2_BCR, lw);
+    Assert(addr != D3_BCR, lw);
+    Assert(addr != D4_BCR, lw);
+    Assert(addr != D5_BCR, lw);
+    Assert(addr != D6_BCR, lw);
+
+    Assert(addr != D0_MADR, lw);
+    Assert(addr != D1_MADR, lw);
+    Assert(addr != D2_MADR, lw);
+    Assert(addr != D3_MADR, lw);
+    Assert(addr != D4_MADR, lw);
+    Assert(addr != D5_MADR, lw);
+    Assert(addr != D6_MADR, lw);
+
+    Assert(addr != D0_CHCR, lw);
+    Assert(addr != D1_CHCR, lw);
+    Assert(addr != D2_CHCR, lw);
+    Assert(addr != D3_CHCR, lw);
+    Assert(addr != D4_CHCR, lw);
+    Assert(addr != D5_CHCR, lw);
+
+    if (addr == D6_CHCR) {
+        lds_push(psx->load_delay_slots, GET_RT(instr), psx->dma_chcr[6]);
+        return GET_RT(instr);
+    }
 
     if (addr == DPCR) {
         lds_push(psx->load_delay_slots, GET_RT(instr), psx->dpcr);
