@@ -806,6 +806,16 @@ dasm_or(struct psx *psx, u32 instr)
 }
 
 void
+dasm_xor(struct psx *psx, u32 instr)
+{
+    if (GET_RS(instr) != GET_RD(instr)) {
+        dasm_print(psx, instr, "xor", d_RD, d_RS, d_RT);
+    } else {
+        dasm_print(psx, instr, "xor", d_RD, d_RT);
+    }
+}
+
+void
 dasm_and(struct psx *psx, u32 instr)
 {
     if (GET_RD(instr) == GET_RS(instr)) {
@@ -1604,6 +1614,14 @@ or(struct psx *psx, u32 instr)
 }
 
 u8
+xor(struct psx *psx, u32 instr)
+{
+    psx->regs[GET_RD(instr)] =
+        psx->regs[GET_RS(instr)] ^ psx->regs[GET_RT(instr)];
+    return GET_RD(instr);
+}
+
+u8
 nor(struct psx *psx, u32 instr)
 {
     psx->regs[GET_RD(instr)] =
@@ -2146,7 +2164,10 @@ h_or:
     POST_OP(false);
     DISPATCH();
 h_xor:
-    assert(false);
+    PRE_OP(xor);
+    psx->last_modified_reg = xor(psx, instr);
+    POST_OP(false);
+    DISPATCH();
 h_nor:
     PRE_OP(nor);
     psx->last_modified_reg = nor(psx, instr);
