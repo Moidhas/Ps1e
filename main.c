@@ -331,7 +331,8 @@ struct psx {
 
     u32 dma_bcr[7];
 
-#define OTC_MASTER (1 << 27)
+#define DMA2_MASTER (1 << 11)
+#define DMA6_MASTER (1 << 27)
     u32 dpcr;
 
     u32 dicr;
@@ -809,9 +810,9 @@ void
 dasm_xor(struct psx *psx, u32 instr)
 {
     if (GET_RS(instr) != GET_RD(instr)) {
-        dasm_print(psx, instr, "xor", d_RD, d_RS, d_RT);
+        dasm_print(psx, instr, "xor", d_RD, d_RS, d_RT, STOP);
     } else {
-        dasm_print(psx, instr, "xor", d_RD, d_RT);
+        dasm_print(psx, instr, "xor", d_RD, d_RT, STOP);
     }
 }
 
@@ -1443,7 +1444,8 @@ sw(struct psx *psx, u32 instr)
     u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
     u32 val = psx->regs[GET_RT(instr)];
 
-    Assert(addr != GP1 || (val & GP_CMD) == 0 || (val & GP_CMD) == (0x08 << 24),
+    Assert(addr != GP1 || (val & GP_CMD) == 0 ||
+               (val & GP_CMD) == (0x08 << 24) || (val & GP_CMD) == (0x04 << 24),
            sw);
     Assert(addr != GP0 || (val & GP_CMD) == DRAW_MODE_SETTINGS ||
                (val & GP_CMD) == 0,
@@ -1452,21 +1454,20 @@ sw(struct psx *psx, u32 instr)
 
     Assert(addr != D0_BCR, sw);
     Assert(addr != D1_BCR, sw);
-    Assert(addr != D2_BCR, sw);
     Assert(addr != D3_BCR, sw);
     Assert(addr != D4_BCR, sw);
     Assert(addr != D5_BCR, sw);
 
     Assert(addr != D0_MADR, sw);
     Assert(addr != D1_MADR, sw);
-    Assert(addr != D2_MADR, sw);
     Assert(addr != D3_MADR, sw);
     Assert(addr != D4_MADR, sw);
     Assert(addr != D5_MADR, sw);
 
     Assert(addr != D0_CHCR, sw);
     Assert(addr != D1_CHCR, sw);
-    Assert(addr != D2_CHCR || (val & START_TRANSFER) == 0, sw);
+    Assert(addr != D2_CHCR || (val & START_TRANSFER) == 0 || val == 0x01000401,
+           sw);
     Assert(addr != D3_CHCR, sw);
     Assert(addr != D4_CHCR, sw);
     Assert(addr != D5_CHCR, sw);
@@ -1511,6 +1512,45 @@ sw(struct psx *psx, u32 instr)
         return 0;
     }
 
+    /* RAM to GP0 write FIFO (commands for GP0)
+     * MADR +4 increments
+     * Linked list mode
+     * Start Transfer
+     * No force transfer start have to wait for DREQ
+     * */
+    if (addr == D2_CHCR && val == 0x01000401) {
+        Assert((psx->dpcr & DMA2_MASTER) != 0, sw);
+        Assert((psx->gpustat & DREQ) != 0, sw);
+        /* Should someday check that this is a ram address */
+        u32 node_addr = psx->dma_madr[2];
+        while (node_addr != 0xffffff) {
+            u32 *node = GET_WORD_PTR(psx->addr[node_addr]);
+
+            const u32 header = *node;
+
+            /* Number of extra commands (not including header) to transfer
+             * node */
+            const u8 cmd_cnt = (header & ~0xffffff) >> 24;
+
+            /* exclude header word */
+            ++node;
+
+            /* I need to better understand how the gpu actually renders shit,
+             * I think this is finally the point of rendering shit.
+             * */
+            for (int i = 0; i < cmd_cnt; ++i) {
+                printf("(%08x)\n", node[i]);
+                assert(false);
+            }
+
+            node_addr = header & 0xffffff;
+        }
+
+        /* at transfer end contains end marker, technically madr should get
+         * updated everytime node_addr gets updated. */
+        psx->dma_madr[2] = node_addr;
+    }
+
     if (addr == GP1 && (val & GP_CMD) == 0) {
         psx->gpustat = GP1_RESET;
         return 0;
@@ -1520,6 +1560,31 @@ sw(struct psx *psx, u32 instr)
         psx->gpustat = (psx->gpustat & ~(GENMASK(22, 16) | (1 << 14))) |
                        ((val & GENMASK(5, 0)) << 17) |
                        ((val & (1 << 6)) << 10) | ((val & (1 << 7)) << 7);
+        return 0;
+    }
+
+    if (addr == GP1 && (val & GP_CMD) == (0x04 << 24)) {
+        psx->gpustat =
+            (psx->gpustat & ~GENMASK(30, 29)) | ((val & GENMASK(1, 0)) << 29);
+
+        if ((val & GENMASK(1, 0)) != 0) {
+            Assert((val & GENMASK(1, 0)) == 2, sw);
+            psx->gpustat |= DREQ | WFEP;
+        } else {
+            psx->gpustat &= ~DREQ;
+        }
+
+        return 0;
+    }
+
+    if (addr == D2_MADR) {
+        Assert((val & GENMASK(1, 0)) == 0, sw);
+        psx->dma_madr[2] = val & GENMASK(23, 0);
+        return 0;
+    }
+
+    if (addr == D2_BCR) {
+        psx->dma_bcr[2] = val;
         return 0;
     }
 
@@ -1542,11 +1607,9 @@ sw(struct psx *psx, u32 instr)
             (val & FORCE_TRANSFER_START & START_TRANSFER & BUS_SNOOPING) |
             (1 << 1);
 
-        /* Lazy: start transfer should be if bit 25 goes 0 -> 1 rather
-         * then just checking if it's 1. Right now don't care since immediately
-         * start and finish transfer. */
         if (psx->dma_chcr[6] & START_TRANSFER) {
-            Assert((psx->dpcr & OTC_MASTER) != 0, sw);
+            Assert((psx->dpcr & DMA6_MASTER) != 0, sw);
+            Assert((psx->dma_chcr[6] & FORCE_TRANSFER_START) != 0, sw);
             /* FORCE_TRANSFER_START cleared on transfer start */
             psx->dma_chcr[6] &= ~FORCE_TRANSFER_START;
 
@@ -1686,7 +1749,6 @@ lw(struct psx *psx, u32 instr)
 
     Assert(addr != D0_CHCR, lw);
     Assert(addr != D1_CHCR, lw);
-    Assert(addr != D2_CHCR, lw);
     Assert(addr != D3_CHCR, lw);
     Assert(addr != D4_CHCR, lw);
     Assert(addr != D5_CHCR, lw);
@@ -1708,6 +1770,11 @@ lw(struct psx *psx, u32 instr)
 
     if (addr == GP1) {
         lds_push(psx->load_delay_slots, GET_RT(instr), psx->gpustat);
+        return GET_RT(instr);
+    }
+
+    if (addr == D2_CHCR) {
+        lds_push(psx->load_delay_slots, GET_RT(instr), psx->dma_chcr[2]);
         return GET_RT(instr);
     }
 
