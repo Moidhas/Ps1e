@@ -13,6 +13,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+bool bullshit = false;
+
 typedef uint64_t u64;
 typedef uint32_t u32;
 typedef uint16_t u16;
@@ -48,6 +50,7 @@ typedef int8_t i8;
 #define GENMASK_U16(h, l) GENMASK_TYPE(u16, h, l)
 #define GENMASK_U32(h, l) GENMASK_TYPE(u32, h, l)
 #define GENMASK(h, l) GENMASK_U32(h, l)
+/* Expect reg and mask to be unsigned. */
 #define FIELD_GET(_mask, _reg)                                                 \
     ((typeof(_mask))(((_reg) & (_mask)) >> __builtin_ctzll(_mask)))
 
@@ -246,6 +249,7 @@ enum exc_code : u8 {
     e_Ovf,  /* Arithmetic overflow */
 };
 
+/* GPU version 0 support only so far. */
 struct psx {
     union {
         u32 regs[35];
@@ -336,6 +340,28 @@ struct psx {
     u32 dpcr;
 
     u32 dicr;
+
+    struct {
+        u8 x, y;
+    } texture_window_mask;
+
+    struct {
+        u8 x, y;
+    } texture_window_offset;
+
+    /* The Render commands GP0(20h..7Fh) are automatically clipping any pixels
+     * that are outside of the region described by top_left and bottom_right. */
+    struct {
+        u32 x, y;
+    } draw_area_top_left;
+
+    struct {
+        u32 x, y;
+    } draw_area_bottom_right;
+
+    struct {
+        i32 x, y;
+    } draw_offset;
 
     /* The register that the last executed instruction modified,
      * if no registers were modified then 0. This includes delayed modification
@@ -1483,6 +1509,7 @@ sw(struct psx *psx, u32 instr)
         psx->i_stat &= val;
         return 0;
     }
+
     if (addr == I_MASK) {
         psx->i_mask = val;
         return 0;
@@ -1496,6 +1523,7 @@ sw(struct psx *psx, u32 instr)
     }
 
     /* no need to emulate fifo cmd buffer just always say it's empty. */
+    /* TODO: DUPLICATED CODE */
     if (addr == GP0 && (val & GP_CMD) == DRAW_MODE_SETTINGS) {
         psx->gpustat &= ~(TBY2 | 0x7ff);
         psx->gpustat |= (val & 0x7ff) | ((val & (1 << 11)) << 4);
@@ -1519,8 +1547,14 @@ sw(struct psx *psx, u32 instr)
      * No force transfer start have to wait for DREQ
      * */
     if (addr == D2_CHCR && val == 0x01000401) {
+        psx->dma_chcr[2] = val;
         Assert((psx->dpcr & DMA2_MASTER) != 0, sw);
         Assert((psx->gpustat & DREQ) != 0, sw);
+        Assert((psx->dma_chcr[2] & FORCE_TRANSFER_START) == 0, sw);
+        Assert((psx->dma_chcr[2] & START_TRANSFER) != 0, sw);
+        Assert((psx->dicr & 2) == 0, sw);
+        bullshit = true;
+
         /* Should someday check that this is a ram address */
         u32 node_addr = psx->dma_madr[2];
         while (node_addr != 0xffffff) {
@@ -1535,20 +1569,70 @@ sw(struct psx *psx, u32 instr)
             /* exclude header word */
             ++node;
 
-            /* I need to better understand how the gpu actually renders shit,
-             * I think this is finally the point of rendering shit.
-             * */
             for (int i = 0; i < cmd_cnt; ++i) {
-                printf("(%08x)\n", node[i]);
-                assert(false);
+                /* since these are gp0 command currently duplicated code since
+                 * can modify through sw and dma. */
+                /* GP0 commands */
+                const u32 word = node[i];
+                switch ((word & GP_CMD) >> 24) {
+                default:
+                    printf("GP0(%08x)\n", word);
+                    Assert(false, sw);
+                case 0xe1: /* Duplicate */
+                    psx->gpustat &= ~(TBY2 | 0x7ff);
+                    psx->gpustat |= (word & 0x7ff) | ((word & (1 << 11)) << 4);
+                    break;
+                case 0xe2:
+                    psx->texture_window_mask.x = word & GENMASK(4, 0);
+                    psx->texture_window_mask.y = word & GENMASK(9, 5);
+                    psx->texture_window_offset.x = word & GENMASK(14, 10);
+                    psx->texture_window_offset.y = word & GENMASK(19, 15);
+                    break;
+                case 0xe3: /* Set Drawing Area top left */
+                    psx->draw_area_top_left.x = word & GENMASK(9, 0);
+                    psx->draw_area_top_left.y =
+                        FIELD_GET(GENMASK(18, 10), word);
+                    break;
+                case 0xe4: /* Set Drawing Area bottom right */
+                    psx->draw_area_bottom_right.x = word & GENMASK(9, 0);
+                    psx->draw_area_bottom_right.y =
+                        FIELD_GET(GENMASK(18, 10), word);
+                    break;
+                case 0xe5:
+                    /* x,y can be negative so have
+                     * to worry about sign extension */
+                    psx->draw_offset.x =
+                        (i32)((word & GENMASK(10, 0)) << 21) >> 21;
+                    psx->draw_offset.y =
+                        (i32)((word & GENMASK(21, 11)) << 10) >> 21;
+                    break;
+                case 0xe6:
+                    psx->gpustat &= ~(PBW | PBC);
+                    psx->gpustat |= (word & GENMASK(1, 0)) << 11;
+                    break;
+                }
             }
 
             node_addr = header & 0xffffff;
         }
 
+        /* START_TRANSFER cleared on transfer end */
+        psx->dma_chcr[2] &= ~START_TRANSFER;
+
         /* at transfer end contains end marker, technically madr should get
          * updated everytime node_addr gets updated. */
         psx->dma_madr[2] = node_addr;
+
+        // assert(false && "have to update the dicr and interrupts and other "
+        //                 "things like start transfer dma bits. look at
+        //                 dma6.");
+
+        if ((psx->dicr & (1 << 18)) && (psx->dicr & (1 << 23))) {
+            psx->dicr |= (1 << 26);
+            dma_update_master_interrupt_flag(psx);
+        }
+
+        return 0;
     }
 
     if (addr == GP1 && (val & GP_CMD) == 0) {
@@ -1727,7 +1811,6 @@ lw(struct psx *psx, u32 instr)
 {
     u32 addr = GET_IMM16(instr) + psx->regs[GET_RS(instr)];
 
-    Assert(addr != I_STAT, lw);
     Assert(addr != GP0 || GET_RT(instr) == 0, lw);
     Assert(addr % 4 == 0, lw);
 
@@ -1752,6 +1835,11 @@ lw(struct psx *psx, u32 instr)
     Assert(addr != D3_CHCR, lw);
     Assert(addr != D4_CHCR, lw);
     Assert(addr != D5_CHCR, lw);
+
+    if (addr == I_STAT) {
+        lds_push(psx->load_delay_slots, GET_RT(instr), psx->i_stat);
+        return GET_RT(instr);
+    }
 
     if (addr == D6_CHCR) {
         lds_push(psx->load_delay_slots, GET_RT(instr), psx->dma_chcr[6]);
@@ -1915,7 +2003,9 @@ exec_loop(struct psx *psx)
         bios_functions(psx);                                                   \
         psx->pc = psx->next_pc;                                                \
         psx->next_pc = psx->pc + 4;                                            \
-        /* dasm_##cmd(psx, instr); */                                          \
+        if (bullshit) {                                                        \
+            dasm_##cmd(psx, instr);                                            \
+        }                                                                      \
     } while (0)
 
 #define POST_OP(val)                                                           \
