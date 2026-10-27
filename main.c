@@ -1442,10 +1442,41 @@ sh(struct psx *psx, u32 instr)
     u16 val = psx->regs[GET_RT(instr)] & 0xFFFF;
 
     /* has to be 2 bytes aligned */
-    assert(addr % sizeof(u16) == 0 && !IS_DCHR(addr));
-    Assert(addr != I_STAT, sh);
+    assert(addr % sizeof(u16) == 0);
+
+    Assert(addr != D0_MADR, sh);
+    Assert(addr != D1_MADR, sh);
+    Assert(addr != D2_MADR, sh);
+    Assert(addr != D3_MADR, sh);
+    Assert(addr != D4_MADR, sh);
+    Assert(addr != D5_MADR, sh);
+    Assert(addr != D6_MADR, sh);
+    Assert(addr != D0_BCR, sh);
+    Assert(addr != D1_BCR, sh);
+    Assert(addr != D2_BCR, sh);
+    Assert(addr != D3_BCR, sh);
+    Assert(addr != D4_BCR, sh);
+    Assert(addr != D5_BCR, sh);
+    Assert(addr != D6_BCR, sh);
+    Assert(addr != D0_CHCR, sh);
+    Assert(addr != D1_CHCR, sh);
+    Assert(addr != D2_CHCR, sh);
+    Assert(addr != D3_CHCR, sh);
+    Assert(addr != D4_CHCR, sh);
+    Assert(addr != D5_CHCR, sh);
+    Assert(addr != D6_CHCR, sh);
+    Assert(addr != DPCR, sh);
+    Assert(addr != DICR, sh);
+    Assert(addr != GP0, sh);
+    Assert(addr != GP1, sh);
+
     if (addr == I_MASK) {
         psx->i_mask = val;
+        Assert((psx->i_mask & GENMASK(10, 0)) == psx->i_mask, sh);
+        return 0;
+    } else if (addr == I_STAT) {
+        psx->i_stat &= val;
+        Assert((psx->i_stat & GENMASK(10, 0)) == psx->i_stat, sw);
         return 0;
     }
 
