@@ -1396,9 +1396,33 @@ sb(struct psx *psx, u32 instr)
     u32 addr = psx->regs[GET_RS(instr)] + GET_IMM16(instr);
     u8 value = psx->regs[GET_RT(instr)] & 0xFF;
 
-    assert(!IS_DCHR(addr));
+    Assert(addr != D0_MADR, sb);
+    Assert(addr != D1_MADR, sb);
+    Assert(addr != D2_MADR, sb);
+    Assert(addr != D3_MADR, sb);
+    Assert(addr != D4_MADR, sb);
+    Assert(addr != D5_MADR, sb);
+    Assert(addr != D6_MADR, sb);
+    Assert(addr != D0_BCR, sb);
+    Assert(addr != D1_BCR, sb);
+    Assert(addr != D2_BCR, sb);
+    Assert(addr != D3_BCR, sb);
+    Assert(addr != D4_BCR, sb);
+    Assert(addr != D5_BCR, sb);
+    Assert(addr != D6_BCR, sb);
+    Assert(addr != D0_CHCR, sb);
+    Assert(addr != D1_CHCR, sb);
+    Assert(addr != D2_CHCR, sb);
+    Assert(addr != D3_CHCR, sb);
+    Assert(addr != D4_CHCR, sb);
+    Assert(addr != D5_CHCR, sb);
+    Assert(addr != D6_CHCR, sb);
+    Assert(addr != DPCR, sb);
+    Assert(addr != DICR, sb);
     Assert(addr != I_STAT, sb);
     Assert(addr != I_MASK, sb);
+    Assert(addr != GP0, sb);
+    Assert(addr != GP1, sb);
 
     /* 0x1f802041 is the Post Status byte in the BIOS.
      * An ID byte to say how far along the boot has progressed. */
@@ -1503,57 +1527,47 @@ sw(struct psx *psx, u32 instr)
         /* TODO: figure out what to do when master is not enabled and channel is
          * started. */
         return 0;
-    }
-
-    if (addr == I_STAT) {
+    } else if (addr == I_STAT) {
         psx->i_stat &= val;
+        Assert((psx->i_stat & GENMASK(10, 0)) == psx->i_stat, sw);
         return 0;
-    }
-
-    if (addr == I_MASK) {
+    } else if (addr == I_MASK) {
         psx->i_mask = val;
+        Assert((psx->i_mask & GENMASK(10, 0)) == psx->i_mask, sw);
         return 0;
-    }
-
-    if (addr == DICR) {
+    } else if (addr == DICR) {
         psx->dicr |= val & GENMASK(23, 0);
         psx->dicr &= ~(val & GENMASK(30, 24));
         dma_update_master_interrupt_flag(psx);
         return 0;
-    }
-
-    /* no need to emulate fifo cmd buffer just always say it's empty. */
-    /* TODO: DUPLICATED CODE */
-    if (addr == GP0 && (val & GP_CMD) == DRAW_MODE_SETTINGS) {
+    } else if (addr == GP0 && (val & GP_CMD) == DRAW_MODE_SETTINGS) {
+        /* no need to emulate fifo cmd buffer just always say it's empty. */
+        /* TODO: DUPLICATED CODE */
         psx->gpustat &= ~(TBY2 | 0x7ff);
         psx->gpustat |= (val & 0x7ff) | ((val & (1 << 11)) << 4);
         return 0;
-    }
-
-    /* NOP */
-    if (addr == GP0 && (val & GP_CMD) == 0) {
+    } else if (addr == GP0 && (val & GP_CMD) == 0) {
+        /* NOP */
         return 0;
-    }
-
-    if (addr == D2_CHCR && (val & START_TRANSFER) == 0) {
+    } else if (addr == D2_CHCR && (val & START_TRANSFER) == 0) {
         psx->dma_chcr[2] = val;
         return 0;
-    }
-
-    /* RAM to GP0 write FIFO (commands for GP0)
-     * MADR +4 increments
-     * Linked list mode
-     * Start Transfer
-     * No force transfer start have to wait for DREQ
-     * */
-    if (addr == D2_CHCR && val == 0x01000401) {
+    } else if (addr == D2_CHCR && val == 0x01000401) {
+        /* RAM to GP0 write FIFO (commands for GP0)
+         * MADR +4 increments
+         * Linked list mode
+         * Start Transfer
+         * No force transfer start have to wait for DREQ
+         * */
+        bullshit = true;
         psx->dma_chcr[2] = val;
         Assert((psx->dpcr & DMA2_MASTER) != 0, sw);
         Assert((psx->gpustat & DREQ) != 0, sw);
         Assert((psx->dma_chcr[2] & FORCE_TRANSFER_START) == 0, sw);
         Assert((psx->dma_chcr[2] & START_TRANSFER) != 0, sw);
-        Assert((psx->dicr & 2) == 0, sw);
-        bullshit = true;
+        Assert((psx->dicr & (1 << 2)) == 0, sw);
+        Assert((psx->dicr & (1 << 23)) != 0, sw);
+        Assert((psx->dicr & (1 << 18)) != 0, sw);
 
         /* Should someday check that this is a ram address */
         u32 node_addr = psx->dma_madr[2];
@@ -1623,31 +1637,22 @@ sw(struct psx *psx, u32 instr)
          * updated everytime node_addr gets updated. */
         psx->dma_madr[2] = node_addr;
 
-        // assert(false && "have to update the dicr and interrupts and other "
-        //                 "things like start transfer dma bits. look at
-        //                 dma6.");
-
+        /* Something wrong with interrupt. */
         if ((psx->dicr & (1 << 18)) && (psx->dicr & (1 << 23))) {
             psx->dicr |= (1 << 26);
             dma_update_master_interrupt_flag(psx);
         }
 
         return 0;
-    }
-
-    if (addr == GP1 && (val & GP_CMD) == 0) {
+    } else if (addr == GP1 && (val & GP_CMD) == 0) {
         psx->gpustat = GP1_RESET;
         return 0;
-    }
-
-    if (addr == GP1 && (val & GP_CMD) == (0x08 << 24)) {
+    } else if (addr == GP1 && (val & GP_CMD) == (0x08 << 24)) {
         psx->gpustat = (psx->gpustat & ~(GENMASK(22, 16) | (1 << 14))) |
                        ((val & GENMASK(5, 0)) << 17) |
                        ((val & (1 << 6)) << 10) | ((val & (1 << 7)) << 7);
         return 0;
-    }
-
-    if (addr == GP1 && (val & GP_CMD) == (0x04 << 24)) {
+    } else if (addr == GP1 && (val & GP_CMD) == (0x04 << 24)) {
         psx->gpustat =
             (psx->gpustat & ~GENMASK(30, 29)) | ((val & GENMASK(1, 0)) << 29);
 
@@ -1659,31 +1664,21 @@ sw(struct psx *psx, u32 instr)
         }
 
         return 0;
-    }
-
-    if (addr == D2_MADR) {
+    } else if (addr == D2_MADR) {
         Assert((val & GENMASK(1, 0)) == 0, sw);
         psx->dma_madr[2] = val & GENMASK(23, 0);
         return 0;
-    }
-
-    if (addr == D2_BCR) {
+    } else if (addr == D2_BCR) {
         psx->dma_bcr[2] = val;
         return 0;
-    }
-
-    if (addr == D6_MADR) {
+    } else if (addr == D6_MADR) {
         Assert((val & GENMASK(1, 0)) == 0, sw);
         psx->dma_madr[6] = val & GENMASK(23, 0);
         return 0;
-    }
-
-    if (addr == D6_BCR) {
+    } else if (addr == D6_BCR) {
         psx->dma_bcr[6] = val;
         return 0;
-    }
-
-    if (addr == D6_CHCR) {
+    } else if (addr == D6_CHCR) {
         /* D6_CHCR has only three read/write-able bits: 24,28,30. All other bits
          * are read-only: bit 1 is always 1 (increment=-4), and the other bits
          * are always 0. */
@@ -1727,6 +1722,35 @@ u8
 lbu(struct psx *psx, u32 instr)
 {
     u32 addr = (i32)GET_IMM16(instr) + psx->regs[GET_RS(instr)];
+
+    Assert(addr != D0_MADR, lbu);
+    Assert(addr != D1_MADR, lbu);
+    Assert(addr != D2_MADR, lbu);
+    Assert(addr != D3_MADR, lbu);
+    Assert(addr != D4_MADR, lbu);
+    Assert(addr != D5_MADR, lbu);
+    Assert(addr != D6_MADR, lbu);
+    Assert(addr != D0_BCR, lbu);
+    Assert(addr != D1_BCR, lbu);
+    Assert(addr != D2_BCR, lbu);
+    Assert(addr != D3_BCR, lbu);
+    Assert(addr != D4_BCR, lbu);
+    Assert(addr != D5_BCR, lbu);
+    Assert(addr != D6_BCR, lbu);
+    Assert(addr != D0_CHCR, lbu);
+    Assert(addr != D1_CHCR, lbu);
+    Assert(addr != D2_CHCR, lbu);
+    Assert(addr != D3_CHCR, lbu);
+    Assert(addr != D4_CHCR, lbu);
+    Assert(addr != D5_CHCR, lbu);
+    Assert(addr != D6_CHCR, lbu);
+    Assert(addr != DPCR, lbu);
+    Assert(addr != DICR, lbu);
+    Assert(addr != I_STAT, lbu);
+    Assert(addr != I_MASK, lbu);
+    Assert(addr != GP0, lbu);
+    Assert(addr != GP1, lbu);
+
     u32 byte = psx->addr[addr];
     lds_push(psx->load_delay_slots, GET_RT(instr), byte);
     return GET_RT(instr);
@@ -1736,10 +1760,45 @@ u8
 lhu(struct psx *psx, u32 instr)
 {
     u32 addr = (i32)GET_IMM16(instr) + psx->regs[GET_RS(instr)];
+
+    Assert(addr != D0_MADR, lhu);
+    Assert(addr != D1_MADR, lhu);
+    Assert(addr != D2_MADR, lhu);
+    Assert(addr != D3_MADR, lhu);
+    Assert(addr != D4_MADR, lhu);
+    Assert(addr != D5_MADR, lhu);
+    Assert(addr != D6_MADR, lhu);
+    Assert(addr != D0_BCR, lhu);
+    Assert(addr != D1_BCR, lhu);
+    Assert(addr != D2_BCR, lhu);
+    Assert(addr != D3_BCR, lhu);
+    Assert(addr != D4_BCR, lhu);
+    Assert(addr != D5_BCR, lhu);
+    Assert(addr != D6_BCR, lhu);
+    Assert(addr != D0_CHCR, lhu);
+    Assert(addr != D1_CHCR, lhu);
+    Assert(addr != D2_CHCR, lhu);
+    Assert(addr != D3_CHCR, lhu);
+    Assert(addr != D4_CHCR, lhu);
+    Assert(addr != D5_CHCR, lhu);
+    Assert(addr != D6_CHCR, lhu);
+    Assert(addr != DPCR, lhu);
+    Assert(addr != DICR, lhu);
+    Assert(addr != GP0, lhu);
+    Assert(addr != GP1, lhu);
     assert(addr % 2 == 0);
 
-    u32 halfword = *GET_HALFWORD_PTR(psx->addr[addr]);
+    if (addr == I_MASK) {
+        Assert((psx->i_mask & GENMASK(10, 0)) == psx->i_mask, lhu);
+        lds_push(psx->load_delay_slots, GET_RT(instr), psx->i_mask);
+        return GET_RT(instr);
+    } else if (addr == I_STAT) {
+        Assert((psx->i_stat & GENMASK(10, 0)) == psx->i_stat, lhu);
+        lds_push(psx->load_delay_slots, GET_RT(instr), psx->i_stat);
+        return GET_RT(instr);
+    }
 
+    u32 halfword = *GET_HALFWORD_PTR(psx->addr[addr]);
     lds_push(psx->load_delay_slots, GET_RT(instr), halfword);
     return GET_RT(instr);
 }
@@ -1780,7 +1839,34 @@ u8
 lb(struct psx *psx, u32 instr)
 {
     u32 addr = ((i32)GET_IMM16(instr)) + psx->regs[GET_RS(instr)];
-    Assert(!IS_DCHR(addr), lb);
+
+    Assert(addr != D0_MADR, lb);
+    Assert(addr != D1_MADR, lb);
+    Assert(addr != D2_MADR, lb);
+    Assert(addr != D3_MADR, lb);
+    Assert(addr != D4_MADR, lb);
+    Assert(addr != D5_MADR, lb);
+    Assert(addr != D6_MADR, lb);
+    Assert(addr != D0_BCR, lb);
+    Assert(addr != D1_BCR, lb);
+    Assert(addr != D2_BCR, lb);
+    Assert(addr != D3_BCR, lb);
+    Assert(addr != D4_BCR, lb);
+    Assert(addr != D5_BCR, lb);
+    Assert(addr != D6_BCR, lb);
+    Assert(addr != D0_CHCR, lb);
+    Assert(addr != D1_CHCR, lb);
+    Assert(addr != D2_CHCR, lb);
+    Assert(addr != D3_CHCR, lb);
+    Assert(addr != D4_CHCR, lb);
+    Assert(addr != D5_CHCR, lb);
+    Assert(addr != D6_CHCR, lb);
+    Assert(addr != DPCR, lb);
+    Assert(addr != DICR, lb);
+    Assert(addr != I_STAT, lb);
+    Assert(addr != I_MASK, lb);
+    Assert(addr != GP0, lb);
+    Assert(addr != GP1, lb);
 
     /* i forgot why? */
     if (PADDR(addr) == 0x1f000084 && addr != 0xfffe0130) {
@@ -1798,7 +1884,35 @@ u8
 lh(struct psx *psx, u32 instr)
 {
     u32 addr = (i32)GET_IMM16(instr) + psx->regs[GET_RS(instr)];
-    Assert(addr % 2 == 0 && !IS_DCHR(addr), lh);
+
+    Assert(addr != D0_MADR, lh);
+    Assert(addr != D1_MADR, lh);
+    Assert(addr != D2_MADR, lh);
+    Assert(addr != D3_MADR, lh);
+    Assert(addr != D4_MADR, lh);
+    Assert(addr != D5_MADR, lh);
+    Assert(addr != D6_MADR, lh);
+    Assert(addr != D0_BCR, lh);
+    Assert(addr != D1_BCR, lh);
+    Assert(addr != D2_BCR, lh);
+    Assert(addr != D3_BCR, lh);
+    Assert(addr != D4_BCR, lh);
+    Assert(addr != D5_BCR, lh);
+    Assert(addr != D6_BCR, lh);
+    Assert(addr != D0_CHCR, lh);
+    Assert(addr != D1_CHCR, lh);
+    Assert(addr != D2_CHCR, lh);
+    Assert(addr != D3_CHCR, lh);
+    Assert(addr != D4_CHCR, lh);
+    Assert(addr != D5_CHCR, lh);
+    Assert(addr != D6_CHCR, lh);
+    Assert(addr != DPCR, lh);
+    Assert(addr != DICR, lh);
+    Assert(addr != I_STAT, lh);
+    Assert(addr != I_MASK, lh);
+    Assert(addr != GP0, lh);
+    Assert(addr != GP1, lh);
+    assert(addr % 2 == 0);
 
     u32 halfword = (i32)(i16)(*GET_HALFWORD_PTR(psx->addr[addr]));
 
