@@ -1488,6 +1488,14 @@ sh(struct psx *psx, u32 instr)
 void
 interrupt_check(struct psx *psx)
 {
+    /* This variable is used to make interrupts "delayed". 
+     * This is desired since currently when executing something like dma2 channel,
+     * the interrupt happens immediately after sw instruction, before pc, next_addr, and addr_to_instr get updated,
+     * so epc points to the same sw that caused the exception causing infinite loop.
+     * To avoid this use this variable to essentially wait 8 instructions after interrupt conditions are first true.
+     * */
+    static u32 clock = 0;
+
     if (psx->i_stat & psx->i_mask) {
         psx->cause |= 1 << 10;
     } else {
@@ -1499,7 +1507,14 @@ interrupt_check(struct psx *psx)
 
     if (psx->sr & IEc &&
         ((psx->sr & psx->cause & IP) || (psx->cause & psx->sr & Sw))) {
-        exception(psx, e_INT);
+        if (clock == 8) {
+            exception(psx, e_INT);
+            clock = 0; /* resest clock exception done */
+        } else {
+            ++clock;
+        }
+    } else {
+        clock = 0; /* if interrupt are no longer happening clock should be reset */
     }
 }
 
@@ -1959,14 +1974,6 @@ lw(struct psx *psx, u32 instr)
     Assert(addr != GP0 || GET_RT(instr) == 0, lw);
     Assert(addr % 4 == 0, lw);
 
-    Assert(addr != D0_BCR, lw);
-    Assert(addr != D1_BCR, lw);
-    Assert(addr != D2_BCR, lw);
-    Assert(addr != D3_BCR, lw);
-    Assert(addr != D4_BCR, lw);
-    Assert(addr != D5_BCR, lw);
-    Assert(addr != D6_BCR, lw);
-
     Assert(addr != D0_MADR, lw);
     Assert(addr != D1_MADR, lw);
     Assert(addr != D2_MADR, lw);
@@ -1974,12 +1981,23 @@ lw(struct psx *psx, u32 instr)
     Assert(addr != D4_MADR, lw);
     Assert(addr != D5_MADR, lw);
     Assert(addr != D6_MADR, lw);
-
+    Assert(addr != D0_BCR, lw);
+    Assert(addr != D1_BCR, lw);
+    Assert(addr != D2_BCR, lw);
+    Assert(addr != D3_BCR, lw);
+    Assert(addr != D4_BCR, lw);
+    Assert(addr != D5_BCR, lw);
+    Assert(addr != D6_BCR, lw);
     Assert(addr != D0_CHCR, lw);
     Assert(addr != D1_CHCR, lw);
     Assert(addr != D3_CHCR, lw);
     Assert(addr != D4_CHCR, lw);
     Assert(addr != D5_CHCR, lw);
+
+    if (addr == DICR) {
+        lds_push(psx->load_delay_slots, GET_RT(instr), psx->dicr);
+        return GET_RT(instr);
+    }
 
     if (addr == I_STAT) {
         lds_push(psx->load_delay_slots, GET_RT(instr), psx->i_stat);
